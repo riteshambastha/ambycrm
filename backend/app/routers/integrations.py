@@ -112,7 +112,10 @@ async def oauth_callback(
     cred.token_type = tokens.get("token_type")
     cred.expires_at = tokens.get("expires_at")
     cred.scope = tokens.get("scope")
-    cred.raw_data = {k: v for k, v in tokens.items() if k not in ("access_token", "refresh_token")}
+    # Exclude sensitive and non-JSON-serializable fields from raw_data.
+    # expires_at is a datetime (stored separately above); access/refresh tokens are encrypted above.
+    _skip = {"access_token", "refresh_token", "expires_at"}
+    cred.raw_data = {k: v for k, v in tokens.items() if k not in _skip}
 
     await db.flush()
     return IntegrationOut.model_validate(integration)
