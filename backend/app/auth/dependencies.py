@@ -24,7 +24,7 @@ async def get_current_user(
     """Verify the Clerk JWT and return (or upsert) the local User record."""
     token = credentials.credentials
     try:
-        payload = verify_clerk_token(token)
+        payload = await verify_clerk_token(token)
     except jwt.InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -40,10 +40,13 @@ async def get_current_user(
     user = result.scalar_one_or_none()
 
     if user is None:
-        # First-time login: create shadow user record
-        email = (payload.get("email_addresses") or [{}])[0].get("email_address", "") if isinstance(
-            payload.get("email_addresses"), list
-        ) else payload.get("email", "")
+        # First-time login: extract what we can from the JWT payload.
+        # Clerk JWTs include email only when a custom template adds it; fall back to None.
+        email: str | None = payload.get("email") or None
+        if not email and isinstance(payload.get("email_addresses"), list):
+            first = (payload["email_addresses"] or [{}])[0]
+            email = first.get("email_address") or None
+
         user = User(
             clerk_user_id=clerk_user_id,
             email=email,

@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { useAuth, useUser } from "@clerk/nextjs";
+import { useAuth, useUser, SignOutButton } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Building2, Loader2, ArrowRight } from "lucide-react";
+import { Building2, Loader2, ArrowRight, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -50,6 +50,16 @@ export function OnboardingClient() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted p-4">
+      {/* Sign-out link in the top-right corner */}
+      <div className="fixed top-4 right-4">
+        <SignOutButton redirectUrl="/sign-in">
+          <Button variant="ghost" size="sm" className="text-muted-foreground gap-1.5">
+            <LogOut className="size-4" />
+            Sign out
+          </Button>
+        </SignOutButton>
+      </div>
+
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <div className="size-12 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-2">

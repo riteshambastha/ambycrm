@@ -7,7 +7,7 @@ import { ConversationList } from "@/components/chat/ConversationList";
 export default async function ChatPage() {
   const { orgId } = await auth();
   if (!orgId) {
-    redirect("/settings/organization");
+    redirect("/onboarding");
   }
 
   return (

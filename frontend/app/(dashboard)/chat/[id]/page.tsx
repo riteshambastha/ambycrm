@@ -9,7 +9,7 @@ interface ChatConversationPageProps {
 
 export default async function ChatConversationPage({ params }: ChatConversationPageProps) {
   const { orgId } = await auth();
-  if (!orgId) redirect("/settings/organization");
+  if (!orgId) redirect("/onboarding");
 
   const { id } = await params;
 

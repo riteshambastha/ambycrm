@@ -45,7 +45,11 @@ export default function OrganizationSettingsPage() {
         setLoading(false);
       }
     };
-    if (isLoaded && orgId) load();
+    if (isLoaded && orgId) {
+      load();
+    } else if (isLoaded && !orgId) {
+      setLoading(false);
+    }
   }, [isLoaded, orgId, getToken]);
 
   const handleSave = async () => {
