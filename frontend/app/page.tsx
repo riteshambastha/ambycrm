@@ -1,0 +1,12 @@
+export const dynamic = "force-dynamic";
+
+import { redirect } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
+
+export default async function Home() {
+  const { userId } = await auth();
+  if (userId) {
+    redirect("/chat");
+  }
+  redirect("/sign-in");
+}

@@ -1,0 +1,153 @@
+"""Integration Hub router — connector listing, OAuth flows, and management."""
+
+import uuid
+from datetime import datetime, timezone
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.dependencies import CurrentUser, get_current_org_membership, require_org_admin
+from app.connectors import registry
+from app.connectors.oauth_manager import generate_state, parse_state
+from app.database import get_db
+from app.models.integration import Connector, Integration, IntegrationCredential
+from app.schemas.integration import (
+    ConnectorOut,
+    IntegrationOut,
+    OAuthCallbackRequest,
+    OAuthStartResponse,
+)
+from app.services.encryption import decrypt, encrypt
+from app.config import settings
+
+router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+_REDIRECT_URI = f"{settings.FRONTEND_URL}/api/oauth/callback"
+
+
+# ── Connector catalogue ───────────────────────────────────────────────────────
+
+@router.get("/connectors", response_model=list[ConnectorOut])
+async def list_connectors(db: Annotated[AsyncSession, Depends(get_db)]) -> list[ConnectorOut]:
+    result = await db.execute(select(Connector).where(Connector.is_available == True))  # noqa: E712
+    return [ConnectorOut.model_validate(c) for c in result.scalars().all()]
+
+
+# ── OAuth flow ────────────────────────────────────────────────────────────────
+
+@router.get("/oauth/start", response_model=OAuthStartResponse)
+async def start_oauth(
+    connector_key: str,
+    org_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> OAuthStartResponse:
+    await get_current_org_membership(str(org_id), current_user, db)
+    connector = registry.get_instance(connector_key)
+    if not connector:
+        raise HTTPException(status_code=404, detail=f"Connector '{connector_key}' not found")
+
+    state = generate_state(str(org_id), connector_key)
+    url = await connector.get_oauth_url(state=state, redirect_uri=_REDIRECT_URI)
+    return OAuthStartResponse(authorization_url=url, state=state)
+
+
+@router.post("/oauth/callback", response_model=IntegrationOut)
+async def oauth_callback(
+    body: OAuthCallbackRequest,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> IntegrationOut:
+    """Receive the OAuth callback code and exchange it for tokens."""
+    try:
+        org_id, connector_key, _ = parse_state(body.state)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    if connector_key != body.connector_key:
+        raise HTTPException(status_code=400, detail="Connector key mismatch in state")
+
+    await get_current_org_membership(org_id, current_user, db)
+    connector = registry.get_instance(connector_key)
+    if not connector:
+        raise HTTPException(status_code=404, detail=f"Connector '{connector_key}' not found")
+
+    tokens = await connector.exchange_code(code=body.code, redirect_uri=_REDIRECT_URI)
+
+    # Upsert Integration record
+    existing = await db.execute(
+        select(Integration).where(
+            Integration.org_id == org_id,
+            Integration.connector_key == connector_key,
+            Integration.scope == connector.metadata.scope,
+        )
+    )
+    integration = existing.scalar_one_or_none()
+    if not integration:
+        integration = Integration(
+            org_id=uuid.UUID(org_id),
+            connector_key=connector_key,
+            scope=connector.metadata.scope,
+            user_id=current_user.id if connector.metadata.scope == "user" else None,
+        )
+        db.add(integration)
+        await db.flush()
+
+    integration.status = "connected"
+    integration.last_synced_at = datetime.now(timezone.utc)
+
+    # Upsert credentials (encrypted)
+    cred_result = await db.execute(
+        select(IntegrationCredential).where(IntegrationCredential.integration_id == integration.id)
+    )
+    cred = cred_result.scalar_one_or_none()
+    if not cred:
+        cred = IntegrationCredential(integration_id=integration.id)
+        db.add(cred)
+
+    cred.access_token = encrypt(tokens["access_token"])
+    cred.refresh_token = encrypt(tokens["refresh_token"]) if tokens.get("refresh_token") else None
+    cred.token_type = tokens.get("token_type")
+    cred.expires_at = tokens.get("expires_at")
+    cred.scope = tokens.get("scope")
+    cred.raw_data = {k: v for k, v in tokens.items() if k not in ("access_token", "refresh_token")}
+
+    await db.flush()
+    return IntegrationOut.model_validate(integration)
+
+
+# ── Org integrations ──────────────────────────────────────────────────────────
+
+@router.get("/{org_id}", response_model=list[IntegrationOut])
+async def list_org_integrations(
+    org_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[IntegrationOut]:
+    await get_current_org_membership(str(org_id), current_user, db)
+    result = await db.execute(
+        select(Integration).where(Integration.org_id == org_id)
+    )
+    return [IntegrationOut.model_validate(i) for i in result.scalars().all()]
+
+
+@router.delete("/{org_id}/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_integration(
+    org_id: uuid.UUID,
+    integration_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    await require_org_admin(str(org_id), current_user, db)
+    result = await db.execute(
+        select(Integration).where(
+            Integration.id == integration_id, Integration.org_id == org_id
+        )
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    integration.status = "disconnected"
+    await db.flush()
