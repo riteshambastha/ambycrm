@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UserButton, useOrganization } from "@clerk/nextjs";
+import { UserButton } from "@clerk/nextjs";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import {
   MessageSquare,
   Plug,
@@ -57,7 +58,7 @@ const settingsItems = [
 
 export function AppSidebar() {
   const pathname = usePathname();
-  const { organization } = useOrganization();
+  const { org } = useBackendOrg();
 
   return (
     <Sidebar className="border-r">
@@ -68,8 +69,8 @@ export function AppSidebar() {
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold truncate">AmbyChat</p>
-            {organization && (
-              <p className="text-xs text-muted-foreground truncate">{organization.name}</p>
+            {org && (
+              <p className="text-xs text-muted-foreground truncate">{org.org_name}</p>
             )}
           </div>
         </div>

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { useOrg } from "@/lib/hooks/useOrg";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import { apiClient } from "@/lib/api-client";
 import { MemberTable, type Member } from "@/components/settings/MemberTable";
 import { InviteUserModal } from "@/components/settings/InviteUserModal";
@@ -11,11 +11,13 @@ import { Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function MembersPage() {
-  const { getToken, userId } = useAuth();
-  const { orgId, isLoaded } = useOrg();
+  const { getToken } = useAuth();
+  const { orgId, org, isLoaded } = useBackendOrg();
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Role comes directly from useBackendOrg — no need to search the members list
+  const isAdmin = org?.role === "org_admin";
 
   const load = useCallback(async () => {
     const token = await getToken();
@@ -23,16 +25,14 @@ export default function MembersPage() {
     try {
       const data = await apiClient.get<Member[]>(`/organizations/${orgId}/members`, token);
       setMembers(data);
-      // Check if current user is admin
-      const me = data.find((m) => m.user_id === userId);
-      setIsAdmin(me?.role === "org_admin");
     } finally {
       setLoading(false);
     }
-  }, [getToken, orgId, userId]);
+  }, [getToken, orgId]);
 
   useEffect(() => {
     if (isLoaded && orgId) load();
+    else if (isLoaded && !orgId) setLoading(false);
   }, [isLoaded, orgId, load]);
 
   return (
@@ -69,7 +69,6 @@ export default function MembersPage() {
             <MemberTable
               members={members}
               orgId={orgId!}
-              currentUserId={userId ?? undefined}
               canManage={isAdmin}
               onRefresh={load}
             />

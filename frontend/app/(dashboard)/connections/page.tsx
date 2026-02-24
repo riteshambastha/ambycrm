@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { useOrg } from "@/lib/hooks/useOrg";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import { apiClient } from "@/lib/api-client";
 import { ConnectorCard, type ConnectorDefinition, type IntegrationStatus } from "@/components/connectors/ConnectorCard";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -13,7 +13,7 @@ const CATEGORIES = ["crm", "workspace", "meetings"];
 
 export default function ConnectionsPage() {
   const { getToken } = useAuth();
-  const { orgId, isLoaded } = useOrg();
+  const { orgId, isLoaded } = useBackendOrg();
   const [connectors, setConnectors] = useState<ConnectorDefinition[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [loading, setLoading] = useState(true);
