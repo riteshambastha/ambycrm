@@ -129,14 +129,24 @@ async def stream_chat(
 
     # Resolve or create conversation
     if body.conversation_id:
-        result = await db.execute(
-            select(Conversation).options(selectinload(Conversation.messages)).where(
-                Conversation.id == body.conversation_id, Conversation.user_id == current_user.id
+        conv_result = await db.execute(
+            select(Conversation).where(
+                Conversation.id == body.conversation_id,
+                Conversation.user_id == current_user.id,
             )
         )
-        conv = result.scalar_one_or_none()
+        conv = conv_result.scalar_one_or_none()
         if not conv:
             raise HTTPException(status_code=404, detail="Conversation not found")
+
+        # Explicitly load prior messages — never use lazy loading with asyncpg
+        msg_result = await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conv.id)
+            .order_by(Message.created_at)
+        )
+        prior_messages = msg_result.scalars().all()
+        history: list[dict] = [{"role": m.role, "content": m.content} for m in prior_messages]
     else:
         conv = Conversation(
             org_id=org_id,
@@ -145,14 +155,15 @@ async def stream_chat(
         )
         db.add(conv)
         await db.flush()
+        history = []
 
-    # Save user message
+    # Append the new user message to the history that goes to the LLM
+    history.append({"role": "user", "content": body.message})
+
+    # Persist user message
     user_msg = Message(conversation_id=conv.id, role="user", content=body.message)
     db.add(user_msg)
     await db.flush()
-
-    # Build message history for LLM
-    history = [{"role": m.role, "content": m.content} for m in conv.messages]
 
     # Fetch connector data
     connected = await _load_connected_integrations(org_id, current_user.id, db)
