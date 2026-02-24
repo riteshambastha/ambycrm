@@ -1,13 +1,13 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 
 class UserOut(BaseModel):
     id: uuid.UUID
     clerk_user_id: str
-    email: EmailStr
+    email: str | None        # nullable — Clerk JWTs don't include email by default
     first_name: str | None
     last_name: str | None
     avatar_url: str | None
@@ -15,6 +15,17 @@ class UserOut(BaseModel):
     is_active: bool
     last_seen_at: datetime | None
     created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class OrgMembershipOut(BaseModel):
+    org_id: uuid.UUID
+    org_name: str
+    org_slug: str
+    role: str
+    plan: str
+    max_seats: int
 
     model_config = {"from_attributes": True}
 

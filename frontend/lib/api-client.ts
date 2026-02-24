@@ -29,8 +29,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   });
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(error.detail ?? "Request failed");
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    // FastAPI validation errors return detail as an array of {loc, msg, type} objects
+    const detail = body?.detail;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+        ? detail.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join("; ")
+        : res.statusText;
+    throw new Error(message);
   }
 
   if (res.status === 204) return undefined as T;

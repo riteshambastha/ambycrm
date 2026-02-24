@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { useOrg } from "@/lib/hooks/useOrg";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import { toast } from "sonner";
 import { Loader2, Save, Building2, Users, CreditCard } from "lucide-react";
 import Link from "next/link";
@@ -14,45 +14,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 
-interface OrgData {
-  id: string;
-  name: string;
-  slug: string;
-  plan: string;
-  max_seats: int;
-}
-
-// TypeScript note: using `any` for simplicity in the plan value
-type int = number;
-
 export default function OrganizationSettingsPage() {
   const { getToken } = useAuth();
-  const { orgId, isLoaded } = useOrg();
+  const { org, orgId, isLoaded } = useBackendOrg();
   const [orgName, setOrgName] = useState("");
-  const [orgData, setOrgData] = useState<OrgData | null>(null);
   const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(true);
 
+  // Pre-fill form once org data arrives
   useEffect(() => {
-    const load = async () => {
-      const token = await getToken();
-      if (!token || !orgId) return;
-      try {
-        const data = await apiClient.get<OrgData>(`/organizations/${orgId}`, token);
-        setOrgData(data);
-        setOrgName(data.name);
-      } finally {
-        setLoading(false);
-      }
-    };
-    if (isLoaded && orgId) {
-      load();
-    } else if (isLoaded && !orgId) {
-      setLoading(false);
-    }
-  }, [isLoaded, orgId, getToken]);
+    if (org) setOrgName(org.org_name);
+  }, [org]);
 
   const handleSave = async () => {
+    if (!orgId) return;
     setSaving(true);
     try {
       const token = await getToken();
@@ -65,10 +39,24 @@ export default function OrganizationSettingsPage() {
     }
   };
 
-  if (loading) {
+  if (!isLoaded) {
     return (
       <div className="flex items-center justify-center h-48">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (!org) {
+    return (
+      <div className="p-6 max-w-2xl mx-auto">
+        <p className="text-muted-foreground text-sm">
+          No organization found.{" "}
+          <Link href="/onboarding" className="underline">
+            Create one
+          </Link>
+          .
+        </p>
       </div>
     );
   }
@@ -127,7 +115,7 @@ export default function OrganizationSettingsPage() {
           </div>
           <div className="space-y-2">
             <Label>Slug</Label>
-            <Input value={orgData?.slug ?? ""} readOnly className="bg-muted cursor-not-allowed" />
+            <Input value={org.org_slug} readOnly className="bg-muted cursor-not-allowed" />
           </div>
           <Button onClick={handleSave} disabled={saving}>
             {saving ? <Loader2 className="size-4 mr-2 animate-spin" /> : <Save className="size-4 mr-2" />}
@@ -143,12 +131,12 @@ export default function OrganizationSettingsPage() {
         <CardContent className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-sm">Current Plan</span>
-            <Badge>{orgData?.plan ?? "free"}</Badge>
+            <Badge>{org.plan}</Badge>
           </div>
           <Separator />
           <div className="flex items-center justify-between">
             <span className="text-sm">Seat Limit</span>
-            <span className="text-sm font-medium">{orgData?.max_seats} seats</span>
+            <span className="text-sm font-medium">{org.max_seats} seats</span>
           </div>
         </CardContent>
       </Card>
