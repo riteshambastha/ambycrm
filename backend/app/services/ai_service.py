@@ -15,15 +15,21 @@ from app.connectors.registry import registry
 # Which connector keys map to which intent keywords
 _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
     "salesforce": ["salesforce", "deal", "opportunity", "crm", "pipeline", "account"],
-    "hubspot": ["hubspot", "deal", "contact", "company"],
+    "hubspot": ["hubspot", "contact", "company"],
     "dynamics": ["dynamics", "microsoft crm"],
     "sugarcrm": ["sugarcrm", "sugar"],
-    "google_workspace": ["gmail", "email", "google drive", "google docs", "drive"],
-    "microsoft365": ["outlook", "onedrive", "office", "microsoft email"],
-    "fireflies": ["fireflies", "meeting", "transcript", "recording", "call"],
-    "teams": ["teams", "microsoft teams", "meeting"],
-    "otter": ["otter", "transcript"],
-    "recall": ["recall", "recording"],
+    "google_workspace": ["gmail", "google drive", "google docs"],
+    "microsoft365": [
+        "outlook", "onedrive", "office 365",
+        "email", "emails", "inbox", "mail", "message",  # generic email terms
+        "microsoft email", "microsoft mail",
+    ],
+    "fireflies": ["fireflies", "transcript", "recording", "call summary"],
+    "teams": ["teams", "microsoft teams"],
+    "otter": ["otter", "otter.ai"],
+    "recall": ["recall", "recall.ai"],
+    # Generic terms that could apply to any meeting connector
+    "meeting": ["meeting", "meetings", "summary", "summarize my meeting"],
 }
 
 _SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, documents, and meeting transcripts.
@@ -36,15 +42,30 @@ Always:
 """
 
 
+_MEETING_CONNECTORS = {"fireflies", "teams", "otter", "recall"}
+
+
 def detect_connectors(message: str) -> list[str]:
     """Heuristically detect which connectors are relevant to the message."""
     lower = message.lower()
-    matched = []
+    matched: list[str] = []
     for key, keywords in _CONNECTOR_INTENT_MAP.items():
+        if key == "meeting":
+            # generic meeting terms → expand to all meeting connectors
+            if any(kw in lower for kw in keywords):
+                matched.extend(_MEETING_CONNECTORS)
+            continue
         if any(kw in lower for kw in keywords):
             matched.append(key)
-    # If no match, try all connected connectors (caller filters by what's actually connected)
-    return matched
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    result = []
+    for k in matched:
+        if k not in seen:
+            seen.add(k)
+            result.append(k)
+    # Return None-equivalent (empty list) to signal "try all" when nothing matched
+    return result
 
 
 async def fetch_connector_data(

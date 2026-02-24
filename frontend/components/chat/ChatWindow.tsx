@@ -8,24 +8,24 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble, type ChatMessage } from "./MessageBubble";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import { cn } from "@/lib/utils";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 interface ChatWindowProps {
-  orgId: string;
   conversationId?: string;
   initialMessages?: ChatMessage[];
   onConversationCreated?: (id: string) => void;
 }
 
 export function ChatWindow({
-  orgId,
   conversationId: initialConvId,
   initialMessages = [],
   onConversationCreated,
 }: ChatWindowProps) {
   const { getToken } = useAuth();
+  const { orgId, isLoaded: orgLoaded } = useBackendOrg();
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -53,6 +53,10 @@ export function ChatWindow({
     const token = await getToken();
     if (!token) {
       toast.error("Not authenticated");
+      return;
+    }
+    if (!orgId) {
+      toast.error("No organization found. Please create one first.");
       return;
     }
 
@@ -148,6 +152,14 @@ export function ChatWindow({
 
   const isEmpty = messages.length === 0;
 
+  if (!orgLoaded) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Messages area */}
@@ -168,10 +180,10 @@ export function ChatWindow({
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
               {[
-                "Summarize my last Fireflies meeting",
-                "What's the status of our top Salesforce deals?",
-                "Find emails from Acme Corp this week",
-                "Show me HubSpot contacts added today",
+                "Show my latest emails from this week",
+                "Summarize my recent meeting transcripts",
+                "Find emails about invoices or payments",
+                "What deals are open in Salesforce?",
               ].map((suggestion) => (
                 <button
                   key={suggestion}

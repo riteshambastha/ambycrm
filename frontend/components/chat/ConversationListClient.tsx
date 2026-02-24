@@ -3,13 +3,16 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { apiClient } from "@/lib/api-client";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import { ConversationList, type Conversation } from "./ConversationList";
 
-export function ConversationListClient({ orgId }: { orgId: string }) {
+export function ConversationListClient() {
   const { getToken } = useAuth();
+  const { orgId, isLoaded } = useBackendOrg();
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
   useEffect(() => {
+    if (!isLoaded || !orgId) return;
     const load = async () => {
       const token = await getToken();
       if (!token) return;
@@ -20,11 +23,11 @@ export function ConversationListClient({ orgId }: { orgId: string }) {
         );
         setConversations(data);
       } catch {
-        // fail silently
+        // fail silently — conversation list is non-critical
       }
     };
     load();
-  }, [orgId, getToken]);
+  }, [isLoaded, orgId, getToken]);
 
-  return <ConversationList conversations={conversations} orgId={orgId} />;
+  return <ConversationList conversations={conversations} orgId={orgId ?? ""} />;
 }
