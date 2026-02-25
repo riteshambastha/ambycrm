@@ -13,8 +13,7 @@ from app.auth.dependencies import CurrentUser, get_current_org_membership
 from app.database import get_db
 from app.models.conversation import Conversation, Message
 from app.models.integration import Integration, IntegrationCredential
-from app.models.organization import OrganizationMember
-from app.models.user import User
+from app.models.organization import OrgEmployee
 from app.schemas.chat import ChatRequest, ConversationOut, MessageOut
 from app.services.ai_service import detect_connectors, fetch_all_connector_data, stream_chat_response
 from app.services.encryption import decrypt
@@ -171,19 +170,17 @@ async def stream_chat(
     connected = await _load_connected_integrations(org_id, current_user.id, db)
     target_keys = detect_connectors(body.message) or None
 
-    # Load org members so AI service can resolve names → work emails
-    members_result = await db.execute(
-        select(OrganizationMember)
-        .options(selectinload(OrganizationMember.user))
-        .where(OrganizationMember.org_id == org_id, OrganizationMember.is_active == True)  # noqa: E712
+    # Load registered employees so AI service can resolve names → work emails
+    employees_result = await db.execute(
+        select(OrgEmployee).where(OrgEmployee.org_id == org_id)
     )
     org_members = [
         {
-            "first_name": m.user.first_name,
-            "last_name": m.user.last_name,
-            "work_email": m.work_email,
+            "first_name": e.name.split()[0] if e.name else "",
+            "last_name": " ".join(e.name.split()[1:]) if e.name and len(e.name.split()) > 1 else "",
+            "work_email": e.work_email,
         }
-        for m in members_result.scalars().all()
+        for e in employees_result.scalars().all()
     ]
 
     connector_results = await fetch_all_connector_data(

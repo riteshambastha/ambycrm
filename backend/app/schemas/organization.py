@@ -55,6 +55,21 @@ class WorkEmailUpdate(BaseModel):
     work_email: str | None = None
 
 
+class OrgEmployeeCreate(BaseModel):
+    name: str
+    work_email: EmailStr
+
+
+class OrgEmployeeOut(BaseModel):
+    id: uuid.UUID
+    org_id: uuid.UUID
+    name: str
+    work_email: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class InviteCreate(BaseModel):
     email: EmailStr
     role: str = "user"

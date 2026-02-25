@@ -37,6 +37,9 @@ class Organization(Base):
     conversations: Mapped[list["Conversation"]] = relationship(  # noqa: F821
         "Conversation", back_populates="organization", cascade="all, delete-orphan"
     )
+    employees: Mapped[list["OrgEmployee"]] = relationship(
+        "OrgEmployee", back_populates="organization", cascade="all, delete-orphan"
+    )
 
 
 class OrganizationMember(Base):
@@ -60,6 +63,26 @@ class OrganizationMember(Base):
     # Relationships
     organization: Mapped["Organization"] = relationship("Organization", back_populates="members")
     user: Mapped["User"] = relationship("User", back_populates="memberships", foreign_keys=[user_id])
+
+
+class OrgEmployee(Base):
+    """
+    Lightweight employee record for org-level Microsoft 365 email queries.
+    These employees do NOT need an AmbyChat account — the admin adds them by
+    name + work email so the AI can query their Microsoft 365 mailboxes.
+    """
+    __tablename__ = "org_employees"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    work_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationship
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="employees")
 
 
 class Invitation(Base):

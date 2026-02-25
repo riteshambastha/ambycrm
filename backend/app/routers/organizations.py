@@ -10,12 +10,14 @@ from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import CurrentUser, get_current_org_membership, require_org_admin
 from app.database import get_db
-from app.models.organization import Invitation, Organization, OrganizationMember
+from app.models.organization import Invitation, OrgEmployee, Organization, OrganizationMember
 from app.models.user import User
 from app.schemas.organization import (
     InvitationOut,
     InviteCreate,
     MemberOut,
+    OrgEmployeeCreate,
+    OrgEmployeeOut,
     OrganizationCreate,
     OrganizationOut,
     OrganizationUpdate,
@@ -287,3 +289,59 @@ async def accept_invitation(
     invite.accepted_at = datetime.now(timezone.utc)
     await db.flush()
     return {"org_id": str(invite.org_id), "role": invite.role}
+
+
+# ── Org Employees (M365 mailbox targets) ─────────────────────────────────────
+
+@router.get("/{org_id}/employees", response_model=list[OrgEmployeeOut])
+async def list_employees(
+    org_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[OrgEmployeeOut]:
+    """List all employees registered for Microsoft 365 email queries."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    result = await db.execute(
+        select(OrgEmployee)
+        .where(OrgEmployee.org_id == org_id)
+        .order_by(OrgEmployee.name)
+    )
+    return [OrgEmployeeOut.model_validate(e) for e in result.scalars().all()]
+
+
+@router.post("/{org_id}/employees", response_model=OrgEmployeeOut, status_code=status.HTTP_201_CREATED)
+async def add_employee(
+    org_id: uuid.UUID,
+    body: OrgEmployeeCreate,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> OrgEmployeeOut:
+    """Add an employee for Microsoft 365 email querying (no AmbyChat account required)."""
+    await require_org_admin(str(org_id), current_user, db)
+    employee = OrgEmployee(
+        org_id=org_id,
+        name=body.name,
+        work_email=str(body.work_email).lower(),
+    )
+    db.add(employee)
+    await db.flush()
+    return OrgEmployeeOut.model_validate(employee)
+
+
+@router.delete("/{org_id}/employees/{employee_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_employee(
+    org_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Remove an employee record."""
+    await require_org_admin(str(org_id), current_user, db)
+    result = await db.execute(
+        select(OrgEmployee).where(OrgEmployee.id == employee_id, OrgEmployee.org_id == org_id)
+    )
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    await db.delete(employee)
+    await db.flush()
