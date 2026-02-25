@@ -21,9 +21,15 @@ _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
     "sugarcrm": ["sugarcrm", "sugar"],
     "google_workspace": ["gmail", "google drive", "google docs"],
     "microsoft365": [
-        "outlook", "onedrive", "office 365",
-        "email", "emails", "inbox", "mail", "message",  # generic email terms
+        "outlook", "office 365",
+        "email", "emails", "inbox", "mail", "message",
         "microsoft email", "microsoft mail",
+    ],
+    "onedrive": [
+        "onedrive", "one drive", "sharepoint",
+        "file", "files", "folder", "folders", "document", "documents",
+        "spreadsheet", "presentation", "word doc", "excel", "powerpoint",
+        "upload", "attachment", "drive",
     ],
     "fireflies": ["fireflies", "transcript", "recording", "call summary"],
     "teams": ["teams", "microsoft teams"],
@@ -33,12 +39,13 @@ _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
     "meeting": ["meeting", "meetings", "summary", "summarize my meeting"],
 }
 
-_SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, documents, and meeting transcripts.
+_SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, OneDrive files, documents, and meeting transcripts.
 
 When answering, you have been provided with relevant data fetched from connected integrations.
 Always:
-- Cite the source of data (e.g., "From Salesforce:", "From Fireflies transcript:").
-- Be concise and structured.
+- Cite the source of data (e.g., "From Outlook:", "From OneDrive:", "From Salesforce:").
+- Be concise and structured. Use markdown lists and headings where helpful.
+- For OneDrive files, include the file name and web URL so the user can open it directly.
 - If data is missing or unavailable, say so clearly.
 """
 
@@ -139,8 +146,8 @@ async def fetch_all_connector_data(
         if target_keys and key not in target_keys:
             continue
         credentials = dict(integration["credentials"])
-        # Inject target_user so the Microsoft365 connector knows whose mailbox to query
-        if key == "microsoft365" and target_user:
+        # Inject target_user for org-level connectors that query per-employee data
+        if key in ("microsoft365", "onedrive") and target_user:
             credentials["target_user"] = target_user
         tasks.append(fetch_connector_data(key, credentials, query))
     if not tasks:
@@ -162,8 +169,13 @@ def build_context_block(connector_results: list[dict[str, Any]]) -> str:
         if "message" in result:
             lines.append(f"[{key}] Note: {result['message']}")
         items = result.get("results", [])
-        if result.get("target_user"):
-            lines.append(f"[{key}] Emails for {result['target_user']} — {len(items)} result(s):")
+        target_user = result.get("target_user")
+        source = result.get("source", key)
+        if target_user:
+            label = "Files" if source == "onedrive" else "Emails"
+            searched = result.get("searched_for", "")
+            searched_str = f' (searched: "{searched}")' if searched and searched not in ("(latest emails)", "(recent files)") else ""
+            lines.append(f"[{key}] {label} for {target_user}{searched_str} — {len(items)} result(s):")
         else:
             lines.append(f"[{key}] {len(items)} result(s):")
         for item in items[:25]:
