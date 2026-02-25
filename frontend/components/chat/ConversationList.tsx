@@ -51,7 +51,7 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
           </Link>
         </Button>
       </div>
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 h-0">
         <div className="p-2 space-y-1">
           {conversations.length === 0 && (
             <p className="text-xs text-muted-foreground text-center py-8">
@@ -62,17 +62,17 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
             <div
               key={conv.id}
               className={cn(
-                "group relative flex items-start gap-2 rounded-lg px-3 py-2 text-sm hover:bg-accent transition-colors",
+                "group flex items-center gap-1 rounded-lg text-sm hover:bg-accent transition-colors",
                 pathname === `/chat/${conv.id}` && "bg-accent"
               )}
             >
               <Link
                 href={`/chat/${conv.id}`}
-                className="flex items-start gap-2 min-w-0 flex-1"
+                className="flex items-center gap-2 min-w-0 flex-1 px-3 py-2"
               >
-                <MessageSquare className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+                <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium leading-tight pr-6">
+                  <p className="truncate font-medium leading-tight">
                     {conv.title ?? "New conversation"}
                   </p>
                   <p className="text-xs text-muted-foreground">
@@ -81,12 +81,12 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
                 </div>
               </Link>
 
-              {/* Delete button — visible on hover */}
+              {/* Delete button — always in layout (invisible until hover) */}
               <button
                 onClick={(e) => handleDelete(e, conv.id)}
                 disabled={deletingId === conv.id}
                 className={cn(
-                  "absolute right-2 top-2 p-1 rounded opacity-0 group-hover:opacity-100",
+                  "shrink-0 mr-2 p-1 rounded opacity-0 group-hover:opacity-100",
                   "text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
                 )}
                 title="Delete conversation"

@@ -12,7 +12,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <header className="flex h-12 items-center border-b px-4 shrink-0">
             <SidebarTrigger className="-ml-1" />
           </header>
-          <div className="flex-1 overflow-auto">{children}</div>
+          <div className="flex-1 min-h-0 overflow-hidden">{children}</div>
         </main>
       </div>
     </SidebarProvider>

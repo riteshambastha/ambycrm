@@ -48,6 +48,7 @@ export default function ConnectionsPage() {
       : connectors.filter((c) => c.category === activeCategory);
 
   return (
+    <div className="h-full overflow-y-auto">
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       <div className="flex items-start justify-between">
         <div>
@@ -101,6 +102,7 @@ export default function ConnectionsPage() {
           ))}
         </div>
       )}
+    </div>
     </div>
   );
 }
