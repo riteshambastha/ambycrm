@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { useSearchParams, useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
 import { apiClient } from "@/lib/api-client";
 import { ConnectorCard, type ConnectorDefinition, type IntegrationStatus } from "@/components/connectors/ConnectorCard";
@@ -19,6 +21,21 @@ export default function ConnectionsPage() {
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeCategory, setActiveCategory] = useState<string>("all");
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  // Show toast for OAuth callback results and clean the URL
+  useEffect(() => {
+    const error = searchParams.get("error");
+    const success = searchParams.get("success");
+    if (error) {
+      toast.error(`Connection failed: ${decodeURIComponent(error)}`, { duration: 8000 });
+      router.replace("/connections");
+    } else if (success) {
+      toast.success("Connected successfully!");
+      router.replace("/connections");
+    }
+  }, [searchParams, router]);
 
   const load = useCallback(async () => {
     const token = await getToken();
