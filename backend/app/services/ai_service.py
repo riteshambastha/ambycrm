@@ -39,13 +39,15 @@ _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
     "meeting": ["meeting", "meetings", "summary", "summarize my meeting"],
 }
 
-_SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, OneDrive files, documents, and meeting transcripts.
+_SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, OneDrive files, documents, and Teams meeting transcripts.
 
 When answering, you have been provided with relevant data fetched from connected integrations.
 Always:
-- Cite the source of data (e.g., "From Outlook:", "From OneDrive:", "From Salesforce:").
+- Cite the source of data (e.g., "From Outlook:", "From OneDrive:", "From Teams:", "From Salesforce:").
 - Be concise and structured. Use markdown lists and headings where helpful.
 - For OneDrive files, include the file name and web URL so the user can open it directly.
+- For Teams meetings, include the meeting subject, date, and key points from the transcript if available.
+- If a meeting has no transcript (has_transcript: false), note it was not recorded or transcription was not enabled.
 - If data is missing or unavailable, say so clearly.
 """
 
@@ -171,7 +173,7 @@ async def fetch_all_connector_data(
             continue
         credentials = dict(integration["credentials"])
         # Inject target_user for org-level connectors that query per-employee data
-        if key in ("microsoft365", "onedrive") and target_user:
+        if key in ("microsoft365", "onedrive", "teams") and target_user:
             credentials["target_user"] = target_user
         tasks.append(fetch_connector_data(key, credentials, query))
     if not tasks:
@@ -196,9 +198,10 @@ def build_context_block(connector_results: list[dict[str, Any]]) -> str:
         target_user = result.get("target_user")
         source = result.get("source", key)
         if target_user:
-            label = "Files" if source == "onedrive" else "Emails"
+            label = {"onedrive": "Files", "teams": "Meetings"}.get(source, "Emails")
             searched = result.get("searched_for", "")
-            searched_str = f' (searched: "{searched}")' if searched and searched not in ("(latest emails)", "(recent files)") else ""
+            trivial = {"(latest emails)", "(recent files)", "(recent meetings)"}
+            searched_str = f' (searched: "{searched}")' if searched and searched not in trivial else ""
             lines.append(f"[{key}] {label} for {target_user}{searched_str} — {len(items)} result(s):")
         else:
             lines.append(f"[{key}] {len(items)} result(s):")
