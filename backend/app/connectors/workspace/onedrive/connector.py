@@ -11,6 +11,8 @@ folders, and document contents.
 """
 
 import os
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -34,6 +36,98 @@ _OFFICE_READABLE = {".docx", ".doc"}
 _MAX_CONTENT_CHARS = 2000
 # Skip fetching content for files larger than this
 _MAX_FETCH_SIZE_BYTES = 512 * 1024  # 512 KB
+
+
+def _parse_date_range(query: str) -> tuple[datetime | None, datetime | None]:
+    """
+    Parse natural-language date constraints from a query string.
+    Returns (start, end) — either may be None (open-ended).
+
+    Supports:
+      "5 years ago"           → window around that year
+      "older than 3 years"    → anything before 3 years ago
+      "before 2021"           → anything before 2021-01-01
+      "after 2019"            → anything after 2019-12-31
+      "since 2022"            → anything after 2022-01-01
+      "in 2020" / "from 2020" → full calendar year 2020
+      "last year"             → full previous calendar year
+      "last 6 months"         → past 6 months
+      "between 2018 and 2021" → inclusive year range
+    """
+    now = datetime.now(timezone.utc)
+    lower = query.lower()
+
+    # "N years ago" — give a ±6-month window around that year
+    m = re.search(r"(\d+)\s+years?\s+ago", lower)
+    if m:
+        n = int(m.group(1))
+        mid = now - timedelta(days=365 * n)
+        return mid - timedelta(days=183), mid + timedelta(days=183)
+
+    # "older than N years / months"
+    m = re.search(r"older\s+than\s+(\d+)\s+(year|month)s?", lower)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        delta = timedelta(days=365 * n) if unit == "year" else timedelta(days=30 * n)
+        return None, now - delta
+
+    # "more than N years old"
+    m = re.search(r"more\s+than\s+(\d+)\s+years?\s+old", lower)
+    if m:
+        n = int(m.group(1))
+        return None, now - timedelta(days=365 * n)
+
+    # "between YEAR and YEAR"
+    m = re.search(r"between\s+(\d{4})\s+and\s+(\d{4})", lower)
+    if m:
+        y1, y2 = sorted([int(m.group(1)), int(m.group(2))])
+        return datetime(y1, 1, 1, tzinfo=timezone.utc), datetime(y2, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    # "before YEAR / prior to YEAR"
+    m = re.search(r"(?:before|prior\s+to)\s+(\d{4})", lower)
+    if m:
+        return None, datetime(int(m.group(1)), 1, 1, tzinfo=timezone.utc)
+
+    # "after YEAR / since YEAR"
+    m = re.search(r"(?:after|since)\s+(\d{4})", lower)
+    if m:
+        return datetime(int(m.group(1)), 12, 31, 23, 59, 59, tzinfo=timezone.utc), None
+
+    # "in YEAR" or "from YEAR" (standalone 4-digit year)
+    m = re.search(r"\b(?:in|from)\s+(\d{4})\b", lower)
+    if not m:
+        m = re.search(r"\b(20\d{2}|19\d{2})\b", lower)  # bare year like "2019 files"
+    if m:
+        y = int(m.group(1))
+        return datetime(y, 1, 1, tzinfo=timezone.utc), datetime(y, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    # "last year"
+    if "last year" in lower:
+        y = now.year - 1
+        return datetime(y, 1, 1, tzinfo=timezone.utc), datetime(y, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+    # "last N months"
+    m = re.search(r"last\s+(\d+)\s+months?", lower)
+    if m:
+        return now - timedelta(days=30 * int(m.group(1))), None
+
+    return None, None
+
+
+def _in_date_range(item: dict[str, Any], start: datetime | None, end: datetime | None) -> bool:
+    """Return True if the item's createdDateTime or lastModifiedDateTime falls in [start, end]."""
+    raw = item.get("createdDateTime") or item.get("lastModifiedDateTime") or ""
+    if not raw:
+        return True  # can't filter — include it
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if start and dt < start:
+            return False
+        if end and dt > end:
+            return False
+        return True
+    except Exception:
+        return True
 
 
 class OneDriveConnector(BaseConnector):
@@ -125,40 +219,65 @@ class OneDriveConnector(BaseConnector):
 
         headers = {"Authorization": f"Bearer {token}"}
 
-        # Extract a meaningful search keyword from the query
+        # Parse any date constraints from the query
+        date_start, date_end = _parse_date_range(query)
+        has_date_filter = date_start is not None or date_end is not None
+
+        # Extract a meaningful content keyword (strip navigation + date words)
         _skip = {
             "show", "get", "find", "fetch", "display", "list", "files", "file",
             "folder", "folders", "onedrive", "drive", "documents", "document",
             "for", "of", "me", "the", "my", "from", "recent", "latest", "all",
             "search", "in", "on", "about", "what", "open", "read",
+            # date stop-words
+            "year", "years", "month", "months", "ago", "old", "older", "than",
+            "before", "after", "since", "between", "last", "prior",
         }
         keyword_parts = [
             w for w in query.lower().split()
-            if w not in _skip and "@" not in w and len(w) > 2
+            if w not in _skip and "@" not in w and len(w) > 2 and not w.isdigit()
         ]
         keyword = " ".join(keyword_parts[:5]).strip()
 
+        # When filtering by date, fetch more results so client-side filter has enough to work with
+        top = 100 if has_date_filter else 20
+
+        _select = "id,name,size,lastModifiedDateTime,createdDateTime,createdBy,webUrl,file,folder,parentReference"
+
         async with httpx.AsyncClient(timeout=30) as client:
             if keyword:
-                # Encode apostrophes to avoid OData parse errors
                 safe_kw = keyword.replace("'", "''")
                 resp = await client.get(
                     f"{_GRAPH_URL}/users/{target_user}/drive/root/search(q='{safe_kw}')",
-                    params={
-                        "$top": 20,
-                        "$select": "id,name,size,lastModifiedDateTime,createdBy,webUrl,file,folder,parentReference",
-                    },
+                    params={"$top": top, "$select": _select},
                     headers=headers,
                 )
+            elif has_date_filter:
+                # No content keyword but we have a date filter — search all files broadly
+                # using the year as a broad search term so we cover subfolders too
+                year_hint = ""
+                if date_end:
+                    year_hint = str(date_end.year)
+                elif date_start:
+                    year_hint = str(date_start.year)
+                # Empty-string search is not allowed; fall back to listing root with higher top
+                if year_hint:
+                    resp = await client.get(
+                        f"{_GRAPH_URL}/users/{target_user}/drive/root/search(q='{year_hint}')",
+                        params={"$top": top, "$select": _select},
+                        headers=headers,
+                    )
+                else:
+                    resp = await client.get(
+                        f"{_GRAPH_URL}/users/{target_user}/drive/root/children",
+                        params={"$top": top, "$select": _select, "$orderby": "lastModifiedDateTime desc"},
+                        headers=headers,
+                    )
             else:
-                # List recent items from the root
+                # No keyword, no date — list root folder, most recent first
                 resp = await client.get(
                     f"{_GRAPH_URL}/users/{target_user}/drive/root/children",
-                    params={
-                        "$top": 20,
-                        "$select": "id,name,size,lastModifiedDateTime,createdBy,webUrl,file,folder,parentReference",
-                        "$orderby": "lastModifiedDateTime desc",
-                    },
+                    params={"$top": top, "$select": _select, "$orderby": "lastModifiedDateTime desc"},
                     headers=headers,
                 )
 
@@ -183,7 +302,14 @@ class OneDriveConnector(BaseConnector):
                 return {"results": [], "source": "onedrive", "error": f"Graph API error {resp.status_code}: {resp.text[:200]}"}
 
             data = resp.json()
-            items = data.get("value", [])
+            raw_items = data.get("value", [])
+
+            # Apply client-side date filter
+            items = (
+                [i for i in raw_items if _in_date_range(i, date_start, date_end)]
+                if has_date_filter
+                else raw_items
+            )
             results: list[dict[str, Any]] = []
 
             for item in items:
@@ -195,6 +321,7 @@ class OneDriveConnector(BaseConnector):
                     "name": name,
                     "type": "folder" if is_folder else (item.get("file", {}).get("mimeType") or "file"),
                     "size_bytes": item.get("size"),
+                    "created": item.get("createdDateTime"),
                     "modified": item.get("lastModifiedDateTime"),
                     "web_url": item.get("webUrl"),
                     "path": item.get("parentReference", {}).get("path", "").replace("/drive/root:", "") or "/",
@@ -243,9 +370,18 @@ class OneDriveConnector(BaseConnector):
 
                 results.append(entry)
 
+            # Build a human-readable description of any date filter applied
+            date_desc = ""
+            if date_start and date_end:
+                date_desc = f" | date range: {date_start.strftime('%Y-%m-%d')} → {date_end.strftime('%Y-%m-%d')}"
+            elif date_end:
+                date_desc = f" | before {date_end.strftime('%Y-%m-%d')}"
+            elif date_start:
+                date_desc = f" | after {date_start.strftime('%Y-%m-%d')}"
+
             return {
                 "results": results,
                 "source": "onedrive",
                 "target_user": target_user,
-                "searched_for": keyword or "(recent files)",
+                "searched_for": (keyword or "(all files)") + date_desc,
             }
