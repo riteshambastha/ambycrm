@@ -13,7 +13,8 @@ const CATEGORIES = ["crm", "workspace", "meetings"];
 
 export default function ConnectionsPage() {
   const { getToken } = useAuth();
-  const { orgId, isLoaded } = useBackendOrg();
+  const { orgId, org, isLoaded } = useBackendOrg();
+  const isAdmin = org?.role === "org_admin";
   const [connectors, setConnectors] = useState<ConnectorDefinition[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,6 +95,7 @@ export default function ConnectionsPage() {
               connector={connector}
               integration={getIntegration(connector.key)}
               orgId={orgId!}
+              isAdmin={isAdmin}
               onStatusChange={load}
             />
           ))}

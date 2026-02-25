@@ -5,6 +5,7 @@ Handles intent detection, parallel connector data fetching, and LLM streaming.
 
 import asyncio
 import json
+import re
 from typing import Any, AsyncIterator
 
 import litellm
@@ -68,6 +69,44 @@ def detect_connectors(message: str) -> list[str]:
     return result
 
 
+def extract_target_user(
+    message: str,
+    org_members: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """
+    Extract a target user email from the natural-language message.
+
+    Priority:
+    1. An explicit email address anywhere in the message.
+    2. A member's full name that matches text in the message (uses work_email).
+
+    Examples:
+      "Show emails for john@acme.com"    → "john@acme.com"
+      "What did Sarah Johnson receive?"  → "sarah.johnson@acme.com"  (if in org_members)
+    """
+    # 1. Direct email address in message
+    email_match = re.search(r"\b[\w.+-]+@[\w.-]+\.\w+\b", message)
+    if email_match:
+        return email_match.group(0).lower()
+
+    # 2. Match a member's name against the message
+    if org_members:
+        lower = message.lower()
+        for member in org_members:
+            work_email = member.get("work_email")
+            if not work_email:
+                continue
+            first = (member.get("first_name") or "").strip().lower()
+            last = (member.get("last_name") or "").strip().lower()
+            full = f"{first} {last}".strip()
+            if full and full in lower:
+                return work_email
+            # Try first name alone only if it is longer than 3 chars (avoid false positives)
+            if first and len(first) > 3 and first in lower:
+                return work_email
+    return None
+
+
 async def fetch_connector_data(
     connector_key: str,
     credentials: dict[str, Any],
@@ -88,16 +127,22 @@ async def fetch_all_connector_data(
     connected_integrations: list[dict[str, Any]],  # [{connector_key, credentials_dict}]
     query: str,
     target_keys: list[str] | None = None,
+    org_members: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch data from all relevant connectors in parallel."""
+    # Pre-compute target user for Microsoft365 org-level connector
+    target_user = extract_target_user(query, org_members)
+
     tasks = []
     for integration in connected_integrations:
         key = integration["connector_key"]
         if target_keys and key not in target_keys:
             continue
-        tasks.append(
-            fetch_connector_data(key, integration["credentials"], query)
-        )
+        credentials = dict(integration["credentials"])
+        # Inject target_user so the Microsoft365 connector knows whose mailbox to query
+        if key == "microsoft365" and target_user:
+            credentials["target_user"] = target_user
+        tasks.append(fetch_connector_data(key, credentials, query))
     if not tasks:
         return []
     return list(await asyncio.gather(*tasks))

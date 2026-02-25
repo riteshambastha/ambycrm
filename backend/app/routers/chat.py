@@ -13,6 +13,8 @@ from app.auth.dependencies import CurrentUser, get_current_org_membership
 from app.database import get_db
 from app.models.conversation import Conversation, Message
 from app.models.integration import Integration, IntegrationCredential
+from app.models.organization import OrganizationMember
+from app.models.user import User
 from app.schemas.chat import ChatRequest, ConversationOut, MessageOut
 from app.services.ai_service import detect_connectors, fetch_all_connector_data, stream_chat_response
 from app.services.encryption import decrypt
@@ -168,7 +170,25 @@ async def stream_chat(
     # Fetch connector data
     connected = await _load_connected_integrations(org_id, current_user.id, db)
     target_keys = detect_connectors(body.message) or None
-    connector_results = await fetch_all_connector_data(connected, body.message, target_keys)
+
+    # Load org members so AI service can resolve names → work emails
+    members_result = await db.execute(
+        select(OrganizationMember)
+        .options(selectinload(OrganizationMember.user))
+        .where(OrganizationMember.org_id == org_id, OrganizationMember.is_active == True)  # noqa: E712
+    )
+    org_members = [
+        {
+            "first_name": m.user.first_name,
+            "last_name": m.user.last_name,
+            "work_email": m.work_email,
+        }
+        for m in members_result.scalars().all()
+    ]
+
+    connector_results = await fetch_all_connector_data(
+        connected, body.message, target_keys, org_members=org_members
+    )
 
     # Accumulate and save the assistant response after streaming
     async def _event_stream() -> AsyncIterator[bytes]:

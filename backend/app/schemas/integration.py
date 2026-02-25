@@ -42,3 +42,9 @@ class OAuthCallbackRequest(BaseModel):
     state: str
     connector_key: str
     org_id: str
+
+
+class OrgConnectRequest(BaseModel):
+    """Connect an org-level integration using client credentials (no OAuth redirect)."""
+    connector_key: str
+    org_id: uuid.UUID

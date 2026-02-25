@@ -180,9 +180,9 @@ export function ChatWindow({
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
               {[
-                "Show my latest emails from this week",
-                "Summarize my recent meeting transcripts",
-                "Find emails about invoices or payments",
+                "Show emails for john@company.com",
+                "Show inbox for Sarah Johnson",
+                "Find emails about invoices for the sales team",
                 "What deals are open in Salesforce?",
               ].map((suggestion) => (
                 <button

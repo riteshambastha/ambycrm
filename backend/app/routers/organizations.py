@@ -19,6 +19,7 @@ from app.schemas.organization import (
     OrganizationCreate,
     OrganizationOut,
     OrganizationUpdate,
+    WorkEmailUpdate,
 )
 from app.services.email_service import send_invitation_email
 from app.config import settings
@@ -111,6 +112,7 @@ async def list_members(
             avatar_url=m.user.avatar_url,
             role=m.role,
             is_active=m.is_active,
+            work_email=m.work_email,
             joined_at=m.joined_at,
         )
         for m in members
@@ -146,6 +148,7 @@ async def deactivate_member(
         avatar_url=member.user.avatar_url,
         role=member.role,
         is_active=member.is_active,
+        work_email=member.work_email,
         joined_at=member.joined_at,
     )
 
@@ -172,6 +175,40 @@ async def update_member_role(
     member.role = role
     await db.flush()
     return {"id": str(member.id), "role": member.role}
+
+
+@router.patch("/{org_id}/members/{member_id}/work-email", response_model=MemberOut)
+async def set_member_work_email(
+    org_id: uuid.UUID,
+    member_id: uuid.UUID,
+    body: WorkEmailUpdate,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MemberOut:
+    """Set or update the Microsoft 365 work email for an org member."""
+    await require_org_admin(str(org_id), current_user, db)
+    result = await db.execute(
+        select(OrganizationMember)
+        .options(selectinload(OrganizationMember.user))
+        .where(OrganizationMember.id == member_id, OrganizationMember.org_id == org_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+    member.work_email = body.work_email
+    await db.flush()
+    return MemberOut(
+        id=member.id,
+        user_id=member.user_id,
+        email=member.user.email,
+        first_name=member.user.first_name,
+        last_name=member.user.last_name,
+        avatar_url=member.user.avatar_url,
+        role=member.role,
+        is_active=member.is_active,
+        work_email=member.work_email,
+        joined_at=member.joined_at,
+    )
 
 
 # ── Invitations ───────────────────────────────────────────────────────────────
@@ -243,6 +280,8 @@ async def accept_invitation(
         user_id=current_user.id,
         role=invite.role,
         invited_by=invite.invited_by,
+        # Pre-populate work_email from the invitation email (the org/work address)
+        work_email=invite.email,
     )
     db.add(member)
     invite.accepted_at = datetime.now(timezone.utc)

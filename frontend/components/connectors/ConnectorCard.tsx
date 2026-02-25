@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { toast } from "sonner";
-import { CheckCircle2, XCircle, Loader2, ExternalLink, Unplug } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, ExternalLink, Unplug, Building2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -51,16 +51,40 @@ interface ConnectorCardProps {
   connector: ConnectorDefinition;
   integration?: IntegrationStatus;
   orgId: string;
+  isAdmin?: boolean;
   onStatusChange: () => void;
 }
 
-export function ConnectorCard({ connector, integration, orgId, onStatusChange }: ConnectorCardProps) {
+export function ConnectorCard({ connector, integration, orgId, isAdmin, onStatusChange }: ConnectorCardProps) {
   const { getToken } = useAuth();
   const [isLoading, setIsLoading] = useState(false);
 
   const isConnected = integration?.status === "connected";
+  const isOrgLevel = connector.auth_type === "client_credentials";
 
-  const handleConnect = async () => {
+  // ── Org-level connect (client credentials, no OAuth redirect) ──────────────
+  const handleOrgConnect = async () => {
+    setIsLoading(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Not authenticated");
+
+      await apiClient.post(
+        "/integrations/org-connect",
+        { connector_key: connector.key, org_id: orgId },
+        token
+      );
+      toast.success(`${connector.name} organization connection activated`);
+      onStatusChange();
+    } catch (err: unknown) {
+      toast.error((err as Error).message ?? "Failed to connect");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // ── User-level OAuth connect ───────────────────────────────────────────────
+  const handleOAuthConnect = async () => {
     setIsLoading(true);
     try {
       const token = await getToken();
@@ -70,7 +94,6 @@ export function ConnectorCard({ connector, integration, orgId, onStatusChange }:
         `/integrations/oauth/start?connector_key=${connector.key}&org_id=${orgId}`,
         token
       );
-      // Redirect to OAuth consent page
       window.location.href = data.authorization_url;
     } catch (err: unknown) {
       toast.error((err as Error).message ?? "Failed to start OAuth flow");
@@ -103,12 +126,20 @@ export function ConnectorCard({ connector, integration, orgId, onStatusChange }:
             <div className="text-2xl">{CONNECTOR_ICONS[connector.key] ?? "🔌"}</div>
             <div>
               <CardTitle className="text-base">{connector.name}</CardTitle>
-              <Badge
-                variant="secondary"
-                className={cn("text-xs mt-1", CATEGORY_COLORS[connector.category])}
-              >
-                {connector.category}
-              </Badge>
+              <div className="flex items-center gap-1 mt-1 flex-wrap">
+                <Badge
+                  variant="secondary"
+                  className={cn("text-xs", CATEGORY_COLORS[connector.category])}
+                >
+                  {connector.category}
+                </Badge>
+                {isOrgLevel && (
+                  <Badge variant="outline" className="text-xs gap-1">
+                    <Building2 className="size-2.5" />
+                    Org-level
+                  </Badge>
+                )}
+              </div>
             </div>
           </div>
           {isConnected ? (
@@ -123,8 +154,12 @@ export function ConnectorCard({ connector, integration, orgId, onStatusChange }:
         <CardDescription className="text-xs">{connector.description}</CardDescription>
         {isConnected && integration?.last_synced_at && (
           <p className="text-xs text-muted-foreground mt-2">
-            Last synced:{" "}
-            {new Date(integration.last_synced_at).toLocaleString()}
+            Last synced: {new Date(integration.last_synced_at).toLocaleString()}
+          </p>
+        )}
+        {isOrgLevel && !isConnected && (
+          <p className="text-xs text-amber-600 mt-2">
+            Requires Azure AD admin consent with <code>Mail.Read</code> application permission.
           </p>
         )}
       </CardContent>
@@ -136,7 +171,7 @@ export function ConnectorCard({ connector, integration, orgId, onStatusChange }:
             size="sm"
             className="w-full text-destructive hover:text-destructive"
             onClick={handleDisconnect}
-            disabled={isLoading}
+            disabled={isLoading || (isOrgLevel && !isAdmin)}
           >
             {isLoading ? (
               <Loader2 className="size-3.5 mr-2 animate-spin" />
@@ -145,11 +180,26 @@ export function ConnectorCard({ connector, integration, orgId, onStatusChange }:
             )}
             Disconnect
           </Button>
+        ) : isOrgLevel ? (
+          <Button
+            size="sm"
+            className="w-full"
+            onClick={handleOrgConnect}
+            disabled={isLoading || !connector.is_available || !isAdmin}
+            title={!isAdmin ? "Only org admins can connect organization-level integrations" : undefined}
+          >
+            {isLoading ? (
+              <Loader2 className="size-3.5 mr-2 animate-spin" />
+            ) : (
+              <Building2 className="size-3.5 mr-2" />
+            )}
+            {isAdmin ? "Activate Org Connection" : "Admin only"}
+          </Button>
         ) : (
           <Button
             size="sm"
             className="w-full"
-            onClick={handleConnect}
+            onClick={handleOAuthConnect}
             disabled={isLoading || !connector.is_available}
           >
             {isLoading ? (

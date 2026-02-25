@@ -72,14 +72,18 @@ export function InviteUserModal({ orgId, onInvited }: InviteUserModalProps) {
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-2">
-            <Label htmlFor="invite-email">Email address</Label>
+            <Label htmlFor="invite-email">Work / Microsoft 365 Email</Label>
             <Input
               id="invite-email"
               type="email"
-              placeholder="colleague@company.com"
+              placeholder="colleague@yourcompany.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
+            <p className="text-xs text-muted-foreground">
+              Use their organizational email (e.g. john@yourcompany.com). This will also be used
+              for Microsoft 365 email queries.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="invite-role">Role</Label>

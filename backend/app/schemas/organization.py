@@ -39,15 +39,20 @@ class OrganizationOut(BaseModel):
 class MemberOut(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
-    email: str
+    email: str | None
     first_name: str | None
     last_name: str | None
     avatar_url: str | None
     role: str
     is_active: bool
+    work_email: str | None
     joined_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class WorkEmailUpdate(BaseModel):
+    work_email: str | None = None
 
 
 class InviteCreate(BaseModel):

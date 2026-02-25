@@ -18,6 +18,7 @@ from app.schemas.integration import (
     IntegrationOut,
     OAuthCallbackRequest,
     OAuthStartResponse,
+    OrgConnectRequest,
 )
 from app.services.encryption import decrypt, encrypt
 from app.config import settings
@@ -116,6 +117,77 @@ async def oauth_callback(
     # expires_at is a datetime (stored separately above); access/refresh tokens are encrypted above.
     _skip = {"access_token", "refresh_token", "expires_at"}
     cred.raw_data = {k: v for k, v in tokens.items() if k not in _skip}
+
+    await db.flush()
+    return IntegrationOut.model_validate(integration)
+
+
+# ── Org-level client-credentials connect ─────────────────────────────────────
+
+@router.post("/org-connect", response_model=IntegrationOut)
+async def org_connect(
+    body: OrgConnectRequest,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> IntegrationOut:
+    """
+    Connect an org-level integration using the client credentials flow.
+    No user OAuth redirect required — uses Azure AD app credentials directly.
+    Only org admins can perform this action.
+    """
+    await require_org_admin(str(body.org_id), current_user, db)
+    connector = registry.get_instance(body.connector_key)
+    if not connector:
+        raise HTTPException(status_code=404, detail=f"Connector '{body.connector_key}' not found")
+    if connector.metadata.auth_type != "client_credentials":
+        raise HTTPException(
+            status_code=400,
+            detail="This connector uses OAuth, not client credentials. Use the OAuth flow instead.",
+        )
+
+    # Fetch an app-level token
+    try:
+        tokens = await connector.get_org_token()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to obtain org token: {exc}") from exc
+
+    # Upsert Integration
+    existing = await db.execute(
+        select(Integration).where(
+            Integration.org_id == body.org_id,
+            Integration.connector_key == body.connector_key,
+            Integration.scope == "org",
+        )
+    )
+    integration = existing.scalar_one_or_none()
+    if not integration:
+        integration = Integration(
+            org_id=body.org_id,
+            connector_key=body.connector_key,
+            scope="org",
+            user_id=None,
+        )
+        db.add(integration)
+        await db.flush()
+
+    integration.status = "connected"
+    integration.last_synced_at = datetime.now(timezone.utc)
+
+    # Upsert credentials
+    cred_result = await db.execute(
+        select(IntegrationCredential).where(IntegrationCredential.integration_id == integration.id)
+    )
+    cred = cred_result.scalar_one_or_none()
+    if not cred:
+        cred = IntegrationCredential(integration_id=integration.id)
+        db.add(cred)
+
+    cred.access_token = encrypt(tokens["access_token"])
+    cred.refresh_token = None  # client credentials don't use refresh tokens
+    cred.token_type = tokens.get("token_type", "Bearer")
+    cred.expires_at = tokens.get("expires_at")
+    cred.scope = "https://graph.microsoft.com/.default"
+    cred.raw_data = {"auth_type": "client_credentials"}
 
     await db.flush()
     return IntegrationOut.model_validate(integration)
