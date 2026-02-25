@@ -128,54 +128,84 @@ async def check_onedrive(token: str, email: str) -> tuple[bool, str]:
 
 
 async def check_teams(token: str, email: str) -> tuple[bool, str]:
-    """Can we list Teams online meetings for a specific user? (OnlineMeetings.Read.All)"""
+    """
+    Can we list Teams calendar meetings for a user? (Calendars.Read.All)
+    Uses /users/{email}/events?$filter=isOnlineMeeting eq true, which returns
+    all real Teams meetings scheduled via Teams or Outlook — unlike
+    /users/{email}/onlineMeetings which only returns Graph-API-created meetings.
+    """
     from datetime import datetime, timedelta, timezone
     start = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
-            f"{GRAPH_URL}/users/{email}/onlineMeetings",
+            f"{GRAPH_URL}/users/{email}/events",
             params={
                 "$top": 3,
-                "$select": "subject,startDateTime",
-                "$filter": f"startDateTime ge {start}",
+                "$select": "subject,start,isOnlineMeeting,onlineMeeting",
+                "$filter": f"isOnlineMeeting eq true and start/dateTime ge '{start}'",
+                "$orderby": "start/dateTime desc",
             },
             headers={"Authorization": f"Bearer {token}"},
         )
         if resp.status_code == 200:
             meetings = resp.json().get("value", [])
             subjects = [m.get("subject", "(no subject)") for m in meetings]
-            return True, f"{len(meetings)} meeting(s) found (last 30 days). Subjects: {subjects}"
+            return True, f"{len(meetings)} Teams calendar meeting(s) found (last 30 days). Subjects: {subjects}"
         return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
 
 
 async def check_teams_transcript_permission(token: str, email: str) -> tuple[bool, str]:
     """
-    Verify OnlineMeetingTranscript.Read.All is granted by checking the
-    transcripts endpoint on the first available meeting (if any).
-    Returns SKIP if no meetings are available to test against.
+    Verify OnlineMeetingTranscript.Read.All is granted.
+    Finds the first Teams calendar meeting with a joinUrl, resolves its
+    Graph meeting ID, then checks the transcripts endpoint.
     """
     from datetime import datetime, timedelta, timezone
     start = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async with httpx.AsyncClient(timeout=20) as client:
-        # Get the first meeting
+        # Get the first online calendar meeting
         resp = await client.get(
-            f"{GRAPH_URL}/users/{email}/onlineMeetings",
-            params={"$top": 1, "$select": "id,subject", "$filter": f"startDateTime ge {start}"},
+            f"{GRAPH_URL}/users/{email}/events",
+            params={
+                "$top": 5,
+                "$select": "subject,start,isOnlineMeeting,onlineMeeting",
+                "$filter": f"isOnlineMeeting eq true and start/dateTime ge '{start}'",
+                "$orderby": "start/dateTime desc",
+            },
             headers={"Authorization": f"Bearer {token}"},
         )
         if not resp.is_success:
-            return False, f"Could not fetch meetings to test transcripts: HTTP {resp.status_code}"
+            return False, f"Could not fetch calendar meetings: HTTP {resp.status_code}"
 
-        meetings = resp.json().get("value", [])
-        if not meetings:
-            return None, "No meetings found in the last 90 days — cannot test transcript permission"
+        events = resp.json().get("value", [])
+        # Find one with a joinUrl so we can resolve the meeting ID
+        join_url = ""
+        subject = ""
+        for ev in events:
+            join_url = (ev.get("onlineMeeting") or {}).get("joinUrl", "")
+            subject = ev.get("subject", "?")
+            if join_url:
+                break
 
-        meeting_id = meetings[0]["id"]
-        subject = meetings[0].get("subject", "?")
+        if not join_url:
+            return None, "No Teams meetings with a joinUrl found in the last 90 days — cannot test transcript permission"
 
-        # Try to list transcripts
+        # Resolve Graph meeting ID from joinUrl
+        resolve = await client.get(
+            f"{GRAPH_URL}/users/{email}/onlineMeetings",
+            params={"$filter": f"joinWebUrl eq '{join_url}'", "$select": "id"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if not resolve.is_success:
+            return False, f"Could not resolve meeting ID from joinUrl: HTTP {resolve.status_code}"
+        matches = resolve.json().get("value", [])
+        if not matches:
+            return None, f"No Graph meeting ID found for '{subject}' — transcript check skipped"
+        meeting_id = matches[0]["id"]
+
+        # Check the transcript endpoint
         tr = await client.get(
             f"{GRAPH_URL}/users/{email}/onlineMeetings/{meeting_id}/transcripts",
             headers={"Authorization": f"Bearer {token}"},
@@ -285,6 +315,7 @@ async def test_onedrive():
 @pytest.mark.asyncio
 @pytest.mark.skipif(not TEST_USER_EMAIL, reason="TEST_USER_EMAIL not set")
 async def test_teams_meetings():
+    """Requires Calendars.Read.All application permission in Azure AD."""
     token = await get_org_token()
     ok, msg = await check_teams(token, TEST_USER_EMAIL)
     assert ok, msg

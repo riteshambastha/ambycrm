@@ -3,10 +3,17 @@ Microsoft Teams connector — Org-level application permissions.
 
 Uses the same Azure AD app registration as Microsoft 365 / OneDrive.
 Requires the Azure AD app to have Application permissions:
-  - OnlineMeetings.Read.All          ← list any employee's meetings
+  - Calendars.Read.All               ← list any employee's calendar / Teams meetings
+  - OnlineMeetings.Read.All          ← resolve meeting ID from joinUrl for transcripts
   - OnlineMeetingTranscript.Read.All ← read transcript content
-  - CallRecords.Read.All             ← org-wide call records (for broad queries)
   - User.Read.All                    ← already granted
+
+Strategy:
+  1. Use GET /users/{email}/events?$filter=isOnlineMeeting eq true to list all real
+     Teams meetings (requires Calendars.Read.All).
+  2. For each event that has a joinUrl, resolve the Graph meeting ID via
+     GET /users/{email}/onlineMeetings?$filter=joinWebUrl eq '{url}'.
+  3. Fetch transcripts from GET /users/{email}/onlineMeetings/{id}/transcripts.
 
 Grant admin consent in the Azure portal after adding these.
 """
@@ -219,17 +226,27 @@ class TeamsConnector(BaseConnector):
         keyword = " ".join(keyword_parts[:4]).strip()
 
         async with httpx.AsyncClient(timeout=40) as client:
-            # Fetch the employee's online meetings
-            params: dict[str, Any] = {
+            # ── Step 1: List calendar events that are online meetings ──────
+            # /users/{email}/events with isOnlineMeeting eq true covers ALL
+            # Teams meetings scheduled via the Teams or Outlook client, unlike
+            # /users/{email}/onlineMeetings which only returns Graph-created meetings.
+            cal_params: dict[str, Any] = {
                 "$top": 20,
-                "$select": "id,subject,startDateTime,endDateTime,joinWebUrl,participants",
+                "$select": "subject,start,end,isOnlineMeeting,onlineMeeting,attendees,organizer",
+                "$orderby": "start/dateTime desc",
             }
-            if filter_str:
-                params["$filter"] = filter_str
+
+            # Compose $filter — must use start/dateTime format for calendar events
+            cal_filters = ["isOnlineMeeting eq true"]
+            if start_str:
+                cal_filters.append(f"start/dateTime ge '{start_str}'")
+            if end_str:
+                cal_filters.append(f"start/dateTime le '{end_str}'")
+            cal_params["$filter"] = " and ".join(cal_filters)
 
             resp = await client.get(
-                f"{_GRAPH_URL}/users/{target_user}/onlineMeetings",
-                params=params,
+                f"{_GRAPH_URL}/users/{target_user}/events",
+                params=cal_params,
                 headers=headers,
             )
 
@@ -241,8 +258,9 @@ class TeamsConnector(BaseConnector):
                     "source": "teams",
                     "error": (
                         "Permission denied. Ensure your Azure AD app has "
-                        "OnlineMeetings.Read.All and OnlineMeetingTranscript.Read.All "
-                        "Application permissions with admin consent."
+                        "Calendars.Read.All, OnlineMeetings.Read.All, and "
+                        "OnlineMeetingTranscript.Read.All Application permissions "
+                        "with admin consent."
                     ),
                 }
             if resp.status_code == 404:
@@ -250,36 +268,51 @@ class TeamsConnector(BaseConnector):
             if not resp.is_success:
                 return {"results": [], "source": "teams", "error": f"Graph API error {resp.status_code}: {resp.text[:200]}"}
 
-            meetings_data = resp.json().get("value", [])
+            events_data = resp.json().get("value", [])
 
             # Filter by keyword (subject match) if provided
             if keyword:
-                meetings_data = [
-                    m for m in meetings_data
-                    if keyword.lower() in (m.get("subject") or "").lower()
+                events_data = [
+                    e for e in events_data
+                    if keyword.lower() in (e.get("subject") or "").lower()
                 ]
 
             results: list[dict[str, Any]] = []
 
-            for meeting in meetings_data[:10]:  # cap at 10 to keep response time reasonable
-                meeting_id: str = meeting.get("id", "")
+            for event in events_data[:10]:  # cap at 10 to keep response time reasonable
+                join_url: str = (event.get("onlineMeeting") or {}).get("joinUrl", "")
                 entry: dict[str, Any] = {
-                    "subject": meeting.get("subject") or "Untitled meeting",
-                    "start": meeting.get("startDateTime"),
-                    "end": meeting.get("endDateTime"),
-                    "join_url": meeting.get("joinWebUrl"),
-                    "organizer": target_user,
+                    "subject": event.get("subject") or "Untitled meeting",
+                    "start": (event.get("start") or {}).get("dateTime"),
+                    "end": (event.get("end") or {}).get("dateTime"),
+                    "join_url": join_url,
+                    "organizer": (event.get("organizer") or {}).get("emailAddress", {}).get("address", target_user),
                 }
 
                 # Extract attendees
-                participants = meeting.get("participants") or {}
                 attendees = [
-                    (a.get("identity") or {}).get("user", {}).get("displayName")
-                    for a in (participants.get("attendees") or [])
+                    (a.get("emailAddress") or {}).get("name")
+                    for a in (event.get("attendees") or [])
                 ]
                 entry["attendees"] = [a for a in attendees if a]
 
-                # Try to fetch transcripts for this meeting
+                # ── Step 2: Resolve Graph meeting ID from joinUrl ──────────
+                # We need the meeting ID to fetch transcripts. The calendar event
+                # has a joinUrl but not the Graph meeting ID directly.
+                meeting_id: str = ""
+                if join_url:
+                    resolve_resp = await client.get(
+                        f"{_GRAPH_URL}/users/{target_user}/onlineMeetings",
+                        params={"$filter": f"joinWebUrl eq '{join_url}'", "$select": "id"},
+                        headers=headers,
+                        timeout=10,
+                    )
+                    if resolve_resp.is_success:
+                        matches = resolve_resp.json().get("value", [])
+                        if matches:
+                            meeting_id = matches[0].get("id", "")
+
+                # ── Step 3: Fetch transcripts ──────────────────────────────
                 if meeting_id:
                     trans_resp = await client.get(
                         f"{_GRAPH_URL}/users/{target_user}/onlineMeetings/{meeting_id}/transcripts",
@@ -289,7 +322,6 @@ class TeamsConnector(BaseConnector):
                     if trans_resp.is_success:
                         transcripts = trans_resp.json().get("value", [])
                         if transcripts:
-                            # Fetch content of the first (most recent) transcript
                             tid = transcripts[0].get("id", "")
                             if tid:
                                 content_resp = await client.get(
@@ -311,6 +343,8 @@ class TeamsConnector(BaseConnector):
                             entry["has_transcript"] = False
                     else:
                         entry["has_transcript"] = False
+                else:
+                    entry["has_transcript"] = False
 
                 results.append(entry)
 
