@@ -76,29 +76,16 @@ def detect_connectors(message: str) -> list[str]:
     return result
 
 
-def extract_target_user(
-    message: str,
-    org_members: list[dict[str, Any]] | None = None,
+def _extract_target_from_text(
+    text: str,
+    org_members: list[dict[str, Any]] | None,
 ) -> str | None:
-    """
-    Extract a target user email from the natural-language message.
-
-    Priority:
-    1. An explicit email address anywhere in the message.
-    2. A member's full name that matches text in the message (uses work_email).
-
-    Examples:
-      "Show emails for john@acme.com"    → "john@acme.com"
-      "What did Sarah Johnson receive?"  → "sarah.johnson@acme.com"  (if in org_members)
-    """
-    # 1. Direct email address in message
-    email_match = re.search(r"\b[\w.+-]+@[\w.-]+\.\w+\b", message)
+    """Extract a target user email from a single text string (no history fallback)."""
+    email_match = re.search(r"\b[\w.+-]+@[\w.-]+\.\w+\b", text)
     if email_match:
         return email_match.group(0).lower()
-
-    # 2. Match a member's name against the message
     if org_members:
-        lower = message.lower()
+        lower = text.lower()
         for member in org_members:
             work_email = member.get("work_email")
             if not work_email:
@@ -108,9 +95,41 @@ def extract_target_user(
             full = f"{first} {last}".strip()
             if full and full in lower:
                 return work_email
-            # Try first name alone only if it is longer than 3 chars (avoid false positives)
             if first and len(first) > 3 and first in lower:
                 return work_email
+    return None
+
+
+def extract_target_user(
+    message: str,
+    org_members: list[dict[str, Any]] | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> str | None:
+    """
+    Extract a target user email from the current message, falling back to
+    recent conversation history so follow-up questions work correctly.
+
+    Priority:
+    1. Explicit email address in current message.
+    2. Known employee name in current message.
+    3. Email / name found in the last 10 conversation turns (most recent first).
+
+    This means "which is the most urgent?" following "show emails for john@acme.com"
+    will correctly resolve john@acme.com as the target.
+    """
+    # Current message first
+    target = _extract_target_from_text(message, org_members)
+    if target:
+        return target
+
+    # Fall back to scanning recent history (newest messages first)
+    if history:
+        for msg in reversed(history[-10:]):
+            content = msg.get("content", "")
+            target = _extract_target_from_text(content, org_members)
+            if target:
+                return target
+
     return None
 
 
@@ -135,10 +154,15 @@ async def fetch_all_connector_data(
     query: str,
     target_keys: list[str] | None = None,
     org_members: list[dict[str, Any]] | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch data from all relevant connectors in parallel."""
-    # Pre-compute target user for Microsoft365 org-level connector
-    target_user = extract_target_user(query, org_members)
+    """Fetch data from all relevant connectors in parallel.
+
+    `history` is the prior conversation turns (role/content dicts). When the
+    current message is a follow-up ("which is most urgent?") that contains no
+    employee name or email, we scan history so the target user is still resolved.
+    """
+    target_user = extract_target_user(query, org_members, history=history)
 
     tasks = []
     for integration in connected_integrations:

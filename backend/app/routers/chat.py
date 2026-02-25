@@ -184,8 +184,10 @@ async def stream_chat(
         for e in employees_result.scalars().all()
     ]
 
+    # Pass prior history so follow-up questions can resolve target user from context
     connector_results = await fetch_all_connector_data(
-        connected, body.message, target_keys, org_members=org_members
+        connected, body.message, target_keys, org_members=org_members,
+        history=history[:-1],  # exclude the just-appended user message (already in `query`)
     )
 
     # Accumulate and save the assistant response after streaming
