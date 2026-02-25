@@ -9,9 +9,17 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble, type ChatMessage } from "./MessageBubble";
 import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
-import { cn } from "@/lib/utils";
+import { apiClient } from "@/lib/api-client";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+interface MessageOut {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  metadata_?: { sources?: string[] };
+  created_at: string;
+}
 
 interface ChatWindowProps {
   conversationId?: string;
@@ -29,10 +37,44 @@ export function ChatWindow({
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [conversationId, setConversationId] = useState(initialConvId);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Load past messages when opening an existing conversation
+  useEffect(() => {
+    if (!initialConvId || !orgId) return;
+    let cancelled = false;
+    const load = async () => {
+      setIsLoadingHistory(true);
+      try {
+        const token = await getToken();
+        if (!token || cancelled) return;
+        const data = await apiClient.get<MessageOut[]>(
+          `/chat/${orgId}/conversations/${initialConvId}/messages`,
+          token
+        );
+        if (cancelled) return;
+        setMessages(
+          data.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            sources: m.metadata_?.sources ?? [],
+          }))
+        );
+        setConversationId(initialConvId);
+      } catch {
+        // non-critical — just show empty chat
+      } finally {
+        if (!cancelled) setIsLoadingHistory(false);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [initialConvId, orgId, getToken]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -152,7 +194,7 @@ export function ChatWindow({
 
   const isEmpty = messages.length === 0;
 
-  if (!orgLoaded) {
+  if (!orgLoaded || isLoadingHistory) {
     return (
       <div className="flex items-center justify-center h-full">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />

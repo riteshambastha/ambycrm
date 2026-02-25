@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { MessageSquare, Plus, Trash2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
 import { useState } from "react";
@@ -25,7 +24,6 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
   const pathname = usePathname();
   const router = useRouter();
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   const handleDelete = async (e: React.MouseEvent, convId: string) => {
     e.preventDefault();
@@ -51,63 +49,63 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
           </Link>
         </Button>
       </div>
-      <ScrollArea className="flex-1 h-0">
-        <div className="p-2 space-y-1">
-          {conversations.length === 0 && (
-            <p className="text-xs text-muted-foreground text-center py-8">
-              No conversations yet
-            </p>
-          )}
-          {conversations.map((conv) => {
-            const isHovered = hoveredId === conv.id;
-            const isDeleting = deletingId === conv.id;
-            const isActive = pathname === `/chat/${conv.id}`;
 
-            return (
-              <div
-                key={conv.id}
-                onMouseEnter={() => setHoveredId(conv.id)}
-                onMouseLeave={() => setHoveredId(null)}
-                className={cn(
-                  "flex items-center rounded-lg text-sm transition-colors",
-                  isActive ? "bg-accent" : "hover:bg-accent"
-                )}
+      {/* Plain scrollable list — avoids Radix ScrollArea clipping issues */}
+      <div className="flex-1 overflow-y-auto min-h-0 p-2 space-y-0.5">
+        {conversations.length === 0 && (
+          <p className="text-xs text-muted-foreground text-center py-8">
+            No conversations yet
+          </p>
+        )}
+        {conversations.map((conv) => {
+          const isDeleting = deletingId === conv.id;
+          const isActive = pathname === `/chat/${conv.id}`;
+
+          return (
+            <div
+              key={conv.id}
+              className={cn(
+                "group flex items-center rounded-lg text-sm transition-colors",
+                isActive ? "bg-accent" : "hover:bg-accent"
+              )}
+            >
+              <Link
+                href={`/chat/${conv.id}`}
+                className="flex items-center gap-2 min-w-0 flex-1 px-2 py-2"
               >
-                {/* Link takes all space minus the fixed-width delete slot */}
-                <Link
-                  href={`/chat/${conv.id}`}
-                  className="flex items-center gap-2 min-w-0 flex-1 px-3 py-2"
-                >
-                  <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-medium leading-tight text-sm">
-                      {conv.title ?? "New conversation"}
-                    </p>
-                    <p className="text-xs text-muted-foreground truncate">
-                      {formatDistanceToNow(new Date(conv.updated_at), { addSuffix: true })}
-                    </p>
-                  </div>
-                </Link>
+                <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium leading-tight text-sm">
+                    {conv.title ?? "New conversation"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDistanceToNow(new Date(conv.updated_at), { addSuffix: true })}
+                  </p>
+                </div>
+              </Link>
 
-                {/* Delete — always reserves space, visible on row hover */}
-                <button
-                  onClick={(e) => handleDelete(e, conv.id)}
-                  disabled={isDeleting}
-                  style={{ opacity: isHovered || isDeleting ? 1 : 0 }}
-                  className="shrink-0 mr-2 p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-opacity"
-                  title="Delete conversation"
-                >
-                  {isDeleting ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : (
-                    <Trash2 className="size-3.5" />
-                  )}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </ScrollArea>
+              {/* Always-visible delete — dims when not focused, red on hover */}
+              <button
+                onClick={(e) => handleDelete(e, conv.id)}
+                disabled={isDeleting}
+                className={cn(
+                  "shrink-0 mr-1.5 p-1 rounded transition-all",
+                  "text-muted-foreground/30 hover:text-destructive hover:bg-destructive/10",
+                  "group-hover:text-muted-foreground/70",
+                  isDeleting && "text-muted-foreground"
+                )}
+                title="Delete conversation"
+              >
+                {isDeleting ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3.5" />
+                )}
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
