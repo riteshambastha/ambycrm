@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { apiClient } from "@/lib/api-client";
 import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
@@ -11,23 +11,38 @@ export function ConversationListClient() {
   const { orgId, isLoaded } = useBackendOrg();
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
-  useEffect(() => {
-    if (!isLoaded || !orgId) return;
-    const load = async () => {
-      const token = await getToken();
-      if (!token) return;
-      try {
-        const data = await apiClient.get<Conversation[]>(
-          `/chat/${orgId}/conversations`,
-          token
-        );
-        setConversations(data);
-      } catch {
-        // fail silently — conversation list is non-critical
-      }
-    };
-    load();
-  }, [isLoaded, orgId, getToken]);
+  const load = useCallback(async () => {
+    if (!orgId) return;
+    const token = await getToken();
+    if (!token) return;
+    try {
+      const data = await apiClient.get<Conversation[]>(
+        `/chat/${orgId}/conversations`,
+        token
+      );
+      setConversations(data);
+    } catch {
+      // fail silently — conversation list is non-critical
+    }
+  }, [orgId, getToken]);
 
-  return <ConversationList conversations={conversations} orgId={orgId ?? ""} />;
+  useEffect(() => {
+    if (isLoaded && orgId) load();
+  }, [isLoaded, orgId, load]);
+
+  const handleDelete = useCallback(async (convId: string) => {
+    const token = await getToken();
+    if (!token || !orgId) return;
+    await apiClient.delete(`/chat/${orgId}/conversations/${convId}`, token);
+    // Remove from local state immediately
+    setConversations((prev) => prev.filter((c) => c.id !== convId));
+  }, [getToken, orgId]);
+
+  return (
+    <ConversationList
+      conversations={conversations}
+      orgId={orgId ?? ""}
+      onDelete={handleDelete}
+    />
+  );
 }

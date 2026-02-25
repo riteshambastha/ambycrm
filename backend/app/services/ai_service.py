@@ -158,10 +158,16 @@ def build_context_block(connector_results: list[dict[str, Any]]) -> str:
         if "error" in result:
             lines.append(f"[{key}] Error: {result['error']}")
             continue
+        # Surface any informational message (e.g. "no target user specified")
+        if "message" in result:
+            lines.append(f"[{key}] Note: {result['message']}")
         items = result.get("results", [])
-        lines.append(f"[{key}] {len(items)} result(s):")
-        for item in items[:5]:
-            lines.append(f"  - {json.dumps(item, default=str)[:300]}")
+        if result.get("target_user"):
+            lines.append(f"[{key}] Emails for {result['target_user']} — {len(items)} result(s):")
+        else:
+            lines.append(f"[{key}] {len(items)} result(s):")
+        for item in items[:10]:
+            lines.append(f"  - {json.dumps(item, default=str)[:400]}")
     lines.append("</connector_data>")
     return "\n".join(lines)
 
