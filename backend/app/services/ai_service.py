@@ -166,7 +166,7 @@ def build_context_block(connector_results: list[dict[str, Any]]) -> str:
             lines.append(f"[{key}] Emails for {result['target_user']} — {len(items)} result(s):")
         else:
             lines.append(f"[{key}] {len(items)} result(s):")
-        for item in items[:10]:
+        for item in items[:25]:
             lines.append(f"  - {json.dumps(item, default=str)[:2500]}")
     lines.append("</connector_data>")
     return "\n".join(lines)

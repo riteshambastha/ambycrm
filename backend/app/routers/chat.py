@@ -86,6 +86,7 @@ async def archive_conversation(
     conv = result.scalar_one_or_none()
     if conv:
         conv.is_archived = True
+        await db.flush()
 
 
 # ── Streaming Chat ────────────────────────────────────────────────────────────

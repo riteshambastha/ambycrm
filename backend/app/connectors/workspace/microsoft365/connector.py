@@ -157,9 +157,19 @@ class Microsoft365Connector(BaseConnector):
         ]
         keyword = " ".join(keyword_parts[:4]).strip()  # up to 4 meaningful words
 
+        # Detect if user wants more emails (e.g. "last 50 emails", "all emails")
+        _lower_query = query.lower()
+        top = 25  # sensible default
+        for token in _lower_query.split():
+            if token.isdigit():
+                top = min(int(token), 50)  # cap at 50
+                break
+        if any(w in _lower_query for w in ("all", "every", "everything")):
+            top = 50
+
         # Build params — use $search only when there is a meaningful keyword
         params: dict[str, Any] = {
-            "$top": 10,
+            "$top": top,
             "$select": "subject,from,toRecipients,receivedDateTime,bodyPreview,body",
             "$orderby": "receivedDateTime desc",
         }

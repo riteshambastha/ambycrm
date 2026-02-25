@@ -122,12 +122,12 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="p-4">
+      <SidebarFooter className="p-4 space-y-2">
         <div className="flex items-center gap-3">
           <UserButton afterSignOutUrl="/sign-in" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium truncate">My Account</p>
-            <p className="text-xs text-muted-foreground">Manage profile</p>
+            <p className="text-xs text-muted-foreground">Click avatar to sign out</p>
           </div>
         </div>
       </SidebarFooter>
