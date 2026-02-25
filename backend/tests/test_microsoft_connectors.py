@@ -141,17 +141,19 @@ async def check_teams(token: str, email: str) -> tuple[bool, str]:
         resp = await client.get(
             f"{GRAPH_URL}/users/{email}/events",
             params={
-                "$top": 3,
+                "$top": 20,
                 "$select": "subject,start,isOnlineMeeting,onlineMeeting",
-                "$filter": f"isOnlineMeeting eq true and start/dateTime ge '{start}'",
+                "$filter": f"start/dateTime ge '{start}'",
                 "$orderby": "start/dateTime desc",
             },
             headers={"Authorization": f"Bearer {token}"},
         )
         if resp.status_code == 200:
-            meetings = resp.json().get("value", [])
-            subjects = [m.get("subject", "(no subject)") for m in meetings]
-            return True, f"{len(meetings)} Teams calendar meeting(s) found (last 30 days). Subjects: {subjects}"
+            all_events = resp.json().get("value", [])
+            # isOnlineMeeting is not server-side filterable — filter client-side
+            meetings = [e for e in all_events if e.get("isOnlineMeeting") or e.get("onlineMeeting")]
+            subjects = [m.get("subject", "(no subject)") for m in meetings[:3]]
+            return True, f"{len(meetings)} Teams meeting(s) found (last 30 days). Subjects: {subjects}"
         return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
 
 
@@ -165,13 +167,13 @@ async def check_teams_transcript_permission(token: str, email: str) -> tuple[boo
     start = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async with httpx.AsyncClient(timeout=20) as client:
-        # Get the first online calendar meeting
+        # Get recent calendar events and filter client-side for online meetings
         resp = await client.get(
             f"{GRAPH_URL}/users/{email}/events",
             params={
-                "$top": 5,
+                "$top": 20,
                 "$select": "subject,start,isOnlineMeeting,onlineMeeting",
-                "$filter": f"isOnlineMeeting eq true and start/dateTime ge '{start}'",
+                "$filter": f"start/dateTime ge '{start}'",
                 "$orderby": "start/dateTime desc",
             },
             headers={"Authorization": f"Bearer {token}"},
@@ -180,10 +182,12 @@ async def check_teams_transcript_permission(token: str, email: str) -> tuple[boo
             return False, f"Could not fetch calendar meetings: HTTP {resp.status_code}"
 
         events = resp.json().get("value", [])
+        # isOnlineMeeting is not server-side filterable — filter client-side
+        online = [e for e in events if e.get("isOnlineMeeting") or e.get("onlineMeeting")]
         # Find one with a joinUrl so we can resolve the meeting ID
         join_url = ""
         subject = ""
-        for ev in events:
+        for ev in online:
             join_url = (ev.get("onlineMeeting") or {}).get("joinUrl", "")
             subject = ev.get("subject", "?")
             if join_url:
@@ -192,22 +196,34 @@ async def check_teams_transcript_permission(token: str, email: str) -> tuple[boo
         if not join_url:
             return None, "No Teams meetings with a joinUrl found in the last 90 days — cannot test transcript permission"
 
-        # Resolve Graph meeting ID from joinUrl
+        # Extract organizer's Azure AD object ID from the joinUrl context
+        import urllib.parse, json as _json
+        organizer_id = ""
+        try:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(join_url).query)
+            ctx = _json.loads(urllib.parse.unquote(qs.get("context", [""])[0]))
+            organizer_id = ctx.get("Oid", "")
+        except Exception:
+            pass
+
+        # Resolve Graph meeting ID via organizer's account (not attendee's)
+        lookup_user = organizer_id or email
         resolve = await client.get(
-            f"{GRAPH_URL}/users/{email}/onlineMeetings",
-            params={"$filter": f"joinWebUrl eq '{join_url}'", "$select": "id"},
+            f"{GRAPH_URL}/users/{lookup_user}/onlineMeetings",
+            params={"$filter": f"joinWebUrl eq '{join_url}'"},
             headers={"Authorization": f"Bearer {token}"},
         )
         if not resolve.is_success:
-            return False, f"Could not resolve meeting ID from joinUrl: HTTP {resolve.status_code}"
+            return False, f"Could not resolve meeting ID from joinUrl (organizer={lookup_user}): HTTP {resolve.status_code}: {resolve.text[:150]}"
         matches = resolve.json().get("value", [])
         if not matches:
             return None, f"No Graph meeting ID found for '{subject}' — transcript check skipped"
         meeting_id = matches[0]["id"]
 
-        # Check the transcript endpoint
+        # Check the transcript endpoint via organizer's account
+        transcript_user = organizer_id or email
         tr = await client.get(
-            f"{GRAPH_URL}/users/{email}/onlineMeetings/{meeting_id}/transcripts",
+            f"{GRAPH_URL}/users/{transcript_user}/onlineMeetings/{meeting_id}/transcripts",
             headers={"Authorization": f"Bearer {token}"},
         )
         if tr.status_code == 200:

@@ -20,6 +20,8 @@ Grant admin consent in the Azure portal after adding these.
 
 import os
 import re
+import urllib.parse
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -35,6 +37,24 @@ _GRAPH_URL = "https://graph.microsoft.com/v1.0"
 _APP_SCOPE = "https://graph.microsoft.com/.default"
 
 _MAX_TRANSCRIPT_CHARS = 4000
+
+
+def _extract_organizer_id(join_url: str) -> str:
+    """
+    Extract the organizer's Azure AD object ID (Oid) from a Teams joinUrl.
+    The context parameter is URL-encoded JSON: {"Tid": "...", "Oid": "..."}
+    Returns empty string if extraction fails.
+    """
+    try:
+        parsed = urllib.parse.urlparse(join_url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        context_str = qs.get("context", [""])[0]
+        if context_str:
+            ctx = json.loads(urllib.parse.unquote(context_str))
+            return ctx.get("Oid", "")
+    except Exception:
+        pass
+    return ""
 
 
 def _parse_vtt(vtt: str) -> str:
@@ -227,22 +247,23 @@ class TeamsConnector(BaseConnector):
 
         async with httpx.AsyncClient(timeout=40) as client:
             # ── Step 1: List calendar events that are online meetings ──────
-            # /users/{email}/events with isOnlineMeeting eq true covers ALL
-            # Teams meetings scheduled via the Teams or Outlook client, unlike
-            # /users/{email}/onlineMeetings which only returns Graph-created meetings.
+            # /users/{email}/events covers ALL Teams meetings scheduled via
+            # Teams or Outlook. Note: isOnlineMeeting is NOT filterable server-
+            # side, so we fetch by date range and filter client-side.
             cal_params: dict[str, Any] = {
-                "$top": 20,
+                "$top": 30,
                 "$select": "subject,start,end,isOnlineMeeting,onlineMeeting,attendees,organizer",
                 "$orderby": "start/dateTime desc",
             }
 
-            # Compose $filter — must use start/dateTime format for calendar events
-            cal_filters = ["isOnlineMeeting eq true"]
+            # Compose $filter — date range only (isOnlineMeeting filtered client-side)
+            cal_filters = []
             if start_str:
                 cal_filters.append(f"start/dateTime ge '{start_str}'")
             if end_str:
                 cal_filters.append(f"start/dateTime le '{end_str}'")
-            cal_params["$filter"] = " and ".join(cal_filters)
+            if cal_filters:
+                cal_params["$filter"] = " and ".join(cal_filters)
 
             resp = await client.get(
                 f"{_GRAPH_URL}/users/{target_user}/events",
@@ -268,7 +289,10 @@ class TeamsConnector(BaseConnector):
             if not resp.is_success:
                 return {"results": [], "source": "teams", "error": f"Graph API error {resp.status_code}: {resp.text[:200]}"}
 
-            events_data = resp.json().get("value", [])
+            all_events = resp.json().get("value", [])
+
+            # Client-side filter: keep only online meetings
+            events_data = [e for e in all_events if e.get("isOnlineMeeting") or e.get("onlineMeeting")]
 
             # Filter by keyword (subject match) if provided
             if keyword:
@@ -297,13 +321,18 @@ class TeamsConnector(BaseConnector):
                 entry["attendees"] = [a for a in attendees if a]
 
                 # ── Step 2: Resolve Graph meeting ID from joinUrl ──────────
-                # We need the meeting ID to fetch transcripts. The calendar event
-                # has a joinUrl but not the Graph meeting ID directly.
+                # Meetings must be resolved via the ORGANIZER's account.
+                # The organizer's Azure AD object ID (Oid) is embedded in the
+                # joinUrl context parameter — we extract it to route the lookup
+                # to the correct user endpoint.
                 meeting_id: str = ""
+                organizer_id: str = ""  # Azure AD object ID of the meeting organizer
                 if join_url:
+                    organizer_id = _extract_organizer_id(join_url)
+                    lookup_user = organizer_id or target_user
                     resolve_resp = await client.get(
-                        f"{_GRAPH_URL}/users/{target_user}/onlineMeetings",
-                        params={"$filter": f"joinWebUrl eq '{join_url}'", "$select": "id"},
+                        f"{_GRAPH_URL}/users/{lookup_user}/onlineMeetings",
+                        params={"$filter": f"joinWebUrl eq '{join_url}'"},
                         headers=headers,
                         timeout=10,
                     )
@@ -312,10 +341,11 @@ class TeamsConnector(BaseConnector):
                         if matches:
                             meeting_id = matches[0].get("id", "")
 
-                # ── Step 3: Fetch transcripts ──────────────────────────────
+                # ── Step 3: Fetch transcripts via organizer's account ──────
+                transcript_user = organizer_id or target_user
                 if meeting_id:
                     trans_resp = await client.get(
-                        f"{_GRAPH_URL}/users/{target_user}/onlineMeetings/{meeting_id}/transcripts",
+                        f"{_GRAPH_URL}/users/{transcript_user}/onlineMeetings/{meeting_id}/transcripts",
                         headers=headers,
                         timeout=15,
                     )
@@ -325,7 +355,7 @@ class TeamsConnector(BaseConnector):
                             tid = transcripts[0].get("id", "")
                             if tid:
                                 content_resp = await client.get(
-                                    f"{_GRAPH_URL}/users/{target_user}/onlineMeetings/{meeting_id}/transcripts/{tid}/content",
+                                    f"{_GRAPH_URL}/users/{transcript_user}/onlineMeetings/{meeting_id}/transcripts/{tid}/content",
                                     params={"$format": "text/vtt"},
                                     headers={**headers, "Accept": "text/vtt"},
                                     timeout=20,
