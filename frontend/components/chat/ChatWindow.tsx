@@ -163,7 +163,7 @@ export function ChatWindow({
   return (
     <div className="flex flex-col h-full">
       {/* Messages area */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 h-0">
         {isEmpty ? (
           <div className="flex flex-col items-center justify-center h-full min-h-[60vh] text-center px-4 space-y-4">
             <div className="size-16 rounded-2xl bg-primary/10 flex items-center justify-center">
