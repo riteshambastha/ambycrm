@@ -92,12 +92,17 @@ class Microsoft365Connector(BaseConnector):
     # ------------------------------------------------------------------
 
     async def test_connection(self, credentials: dict[str, Any]) -> bool:
-        """Verify the app token works by listing users (requires User.Read.All)."""
+        """Verify the app credentials work by fetching a fresh token and listing users."""
+        try:
+            fresh = await self.get_org_token()
+            access_token = fresh["access_token"]
+        except Exception:
+            return False
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
                 f"{_GRAPH_URL}/users",
                 params={"$top": 1, "$select": "id"},
-                headers={"Authorization": f"Bearer {credentials['access_token']}"},
+                headers={"Authorization": f"Bearer {access_token}"},
             )
             return resp.status_code == 200
 
@@ -112,6 +117,9 @@ class Microsoft365Connector(BaseConnector):
         The caller (AI service) sets `credentials["target_user"]` to the
         employee's email address (e.g. john@company.com).  If not set,
         we return a helpful message instead of crashing.
+
+        Always fetches a fresh app-level token (client credentials tokens
+        expire in ~1 hour; we never want to use a stale stored token).
         """
         target_user: str | None = credentials.get("target_user")
         if not target_user:
@@ -125,24 +133,55 @@ class Microsoft365Connector(BaseConnector):
                 ),
             }
 
-        access_token = credentials["access_token"]
+        # Always get a fresh token — client credentials tokens expire in ~1h
+        try:
+            fresh = await self.get_org_token()
+            access_token = fresh["access_token"]
+        except Exception as exc:
+            return {"results": [], "source": "outlook", "error": f"Failed to get org token: {exc}"}
+
         # Sanitize — basic guard against path injection
         if "/" in target_user or "\\" in target_user:
             return {"results": [], "source": "outlook", "error": "Invalid target user"}
 
+        # Extract a meaningful keyword from the query (strip navigation words)
+        # so we can pass a subject-level search term rather than the full prompt.
+        _skip_words = {
+            "show", "get", "find", "fetch", "display", "list", "inbox", "emails",
+            "email", "for", "of", "me", "the", "my", "from", "recent", "latest",
+            "messages", "mail", "about",
+        }
+        keyword_parts = [
+            w for w in query.lower().split()
+            if w not in _skip_words and "@" not in w and len(w) > 2
+        ]
+        keyword = " ".join(keyword_parts[:4]).strip()  # up to 4 meaningful words
+
+        # Build params — use $search only when there is a meaningful keyword
+        params: dict[str, Any] = {
+            "$top": 15,
+            "$select": "subject,from,receivedDateTime,bodyPreview",
+            "$orderby": "receivedDateTime desc",
+        }
+        headers: dict[str, str] = {"Authorization": f"Bearer {access_token}"}
+        if keyword:
+            params["$search"] = f'"{keyword}"'
+            headers["ConsistencyLevel"] = "eventual"
+            # $search and $orderby can't be combined
+            del params["$orderby"]
+
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
                 f"{_GRAPH_URL}/users/{target_user}/messages",
-                params={
-                    "$search": f'"{query[:100]}"',
-                    "$top": 10,
-                    "$select": "subject,from,receivedDateTime,bodyPreview",
-                },
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "ConsistencyLevel": "eventual",
-                },
+                params=params,
+                headers=headers,
             )
+            if resp.status_code == 401:
+                return {
+                    "results": [],
+                    "source": "outlook",
+                    "error": "Authentication failed — the org token is invalid.",
+                }
             if resp.status_code == 404:
                 return {
                     "results": [],
@@ -164,4 +203,5 @@ class Microsoft365Connector(BaseConnector):
                 "results": data.get("value", []),
                 "source": "outlook",
                 "target_user": target_user,
+                "searched_for": keyword or "(latest emails)",
             }
