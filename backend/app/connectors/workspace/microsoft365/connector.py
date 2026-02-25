@@ -159,11 +159,15 @@ class Microsoft365Connector(BaseConnector):
 
         # Build params — use $search only when there is a meaningful keyword
         params: dict[str, Any] = {
-            "$top": 15,
-            "$select": "subject,from,receivedDateTime,bodyPreview",
+            "$top": 10,
+            "$select": "subject,from,toRecipients,receivedDateTime,bodyPreview,body",
             "$orderby": "receivedDateTime desc",
         }
-        headers: dict[str, str] = {"Authorization": f"Bearer {access_token}"}
+        headers: dict[str, str] = {
+            "Authorization": f"Bearer {access_token}",
+            # Ask Graph to return body as plain text (avoids huge HTML blobs)
+            "Prefer": 'outlook.body-content-type="text"',
+        }
         if keyword:
             params["$search"] = f'"{keyword}"'
             headers["ConsistencyLevel"] = "eventual"
@@ -199,8 +203,26 @@ class Microsoft365Connector(BaseConnector):
                 }
             resp.raise_for_status()
             data = resp.json()
+            # Flatten each email into a clean dict the LLM can read easily
+            emails = []
+            for msg in data.get("value", []):
+                body_text = (msg.get("body") or {}).get("content", "")
+                # Truncate very long bodies
+                if len(body_text) > 2000:
+                    body_text = body_text[:2000] + "… [truncated]"
+                emails.append({
+                    "subject": msg.get("subject"),
+                    "from": (msg.get("from") or {}).get("emailAddress", {}).get("address"),
+                    "from_name": (msg.get("from") or {}).get("emailAddress", {}).get("name"),
+                    "to": [
+                        r.get("emailAddress", {}).get("address")
+                        for r in (msg.get("toRecipients") or [])
+                    ],
+                    "received": msg.get("receivedDateTime"),
+                    "body": body_text or msg.get("bodyPreview", ""),
+                })
             return {
-                "results": data.get("value", []),
+                "results": emails,
                 "source": "outlook",
                 "target_user": target_user,
                 "searched_for": keyword or "(latest emails)",

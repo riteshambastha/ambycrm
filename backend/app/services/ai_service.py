@@ -167,7 +167,7 @@ def build_context_block(connector_results: list[dict[str, Any]]) -> str:
         else:
             lines.append(f"[{key}] {len(items)} result(s):")
         for item in items[:10]:
-            lines.append(f"  - {json.dumps(item, default=str)[:400]}")
+            lines.append(f"  - {json.dumps(item, default=str)[:2500]}")
     lines.append("</connector_data>")
     return "\n".join(lines)
 
