@@ -13,18 +13,31 @@ from app.routers import chat, integrations, organizations, users
 
 
 async def seed_connectors() -> None:
-    """Seed the connectors table from the in-code registry."""
+    """Seed/sync the connectors table from the in-code registry.
+
+    Inserts new connectors and updates mutable fields (auth_type, description,
+    category, name, is_available) on existing ones so that code changes are
+    reflected without manual DB migrations.
+    """
     from app.models.integration import Connector
 
     async with AsyncSessionLocal() as session:
         for connector_cls in registry.all_connectors():
             instance = connector_cls()
             seed = instance.to_seed_dict()
-            existing = await session.execute(
+            result = await session.execute(
                 select(Connector).where(Connector.key == seed["key"])
             )
-            if not existing.scalar_one_or_none():
+            row = result.scalar_one_or_none()
+            if row is None:
                 session.add(Connector(**seed))
+            else:
+                # Sync mutable fields so code changes take effect on restart
+                row.auth_type = seed.get("auth_type", row.auth_type)
+                row.name = seed.get("name", row.name)
+                row.description = seed.get("description", row.description)
+                row.category = seed.get("category", row.category)
+                row.is_available = seed.get("is_available", row.is_available)
         await session.commit()
 
 
