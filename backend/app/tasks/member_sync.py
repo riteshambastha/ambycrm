@@ -32,22 +32,12 @@ from app.services.integration_service import (
 # ── Pre-configured prompts per section ──────────────────────────────────────
 
 _SECTION_QUERIES: dict[str, str] = {
-    "emails": (
-        "Show the latest {limit} emails. "
-        "Highlight urgent threads, pending replies, and required action items."
-    ),
-    "files": (
-        "List the latest {limit} OneDrive or Drive files. "
-        "Note recently modified documents and any shared or collaborative files."
-    ),
+    "emails": "Show the latest {limit} emails",
+    "files": "Show the latest {limit} files",
     "salesforce": (
-        "Show activities, open opportunities, contacts, and accounts related to "
-        "{name} ({work_email}). Highlight overdue tasks, hot deals, and key relationships."
+        "Show all data for {name} ({work_email})"
     ),
-    "meetings": (
-        "Show the latest {limit} meeting recordings. "
-        "Include transcript summaries, key decisions, and action items for each."
-    ),
+    "meetings": "Show the latest {limit} meeting recordings",
 }
 
 _SECTION_SYSTEM_PROMPTS: dict[str, str] = {
@@ -130,24 +120,41 @@ async def _sync_section_async(
         if not active:
             return
 
-        # Fetch from all relevant connectors in parallel, inject target_user
-        tasks = []
         connector_key_used = active[0]["connector_key"]
-        for integration in active:
-            creds = dict(integration["credentials"])
-            # Inject target user for org-level connectors
-            if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
-                creds["target_user"] = work_email
-            tasks.append(fetch_connector_data(integration["connector_key"], creds, query))
 
-        results_list = await asyncio.gather(*tasks)
+        if section == "salesforce":
+            from app.connectors.registry import registry
+            sf_connector = registry.get_instance("salesforce")
+            if sf_connector and hasattr(sf_connector, "fetch_person_overview"):
+                sf_creds = next(
+                    (dict(i["credentials"]) for i in active if i["connector_key"] == "salesforce"),
+                    None,
+                )
+                if sf_creds:
+                    result = await sf_connector.fetch_person_overview(
+                        sf_creds, person_name, work_email, limit=limit,
+                    )
+                    all_results: list[dict[str, Any]] = result.get("results", [])
+                    connector_key_used = "salesforce"
+                else:
+                    all_results = []
+            else:
+                all_results = []
+        else:
+            tasks = []
+            for integration in active:
+                creds = dict(integration["credentials"])
+                if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
+                    creds["target_user"] = work_email
+                tasks.append(fetch_connector_data(integration["connector_key"], creds, query))
 
-        # Flatten results from all connectors for this section
-        all_results: list[dict[str, Any]] = []
-        for r in results_list:
-            if "error" not in r:
-                all_results.extend(r.get("results", []))
-                connector_key_used = r.get("connector", connector_key_used)
+            results_list = await asyncio.gather(*tasks)
+
+            all_results = []
+            for r in results_list:
+                if "error" not in r:
+                    all_results.extend(r.get("results", []))
+                    connector_key_used = r.get("connector", connector_key_used)
 
         summary = await _generate_summary(section, all_results)
 

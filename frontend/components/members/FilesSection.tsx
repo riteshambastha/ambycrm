@@ -80,9 +80,10 @@ interface FilesSectionProps {
   loading: boolean;
   data: SectionData | null;
   onRetry?: () => void;
+  onRefresh?: () => void;
 }
 
-export function FilesSection({ loading, data, onRetry }: FilesSectionProps) {
+export function FilesSection({ loading, data, onRetry, onRefresh }: FilesSectionProps) {
   return (
     <SectionWrapper
       title="OneDrive / Drive Files"
@@ -90,6 +91,7 @@ export function FilesSection({ loading, data, onRetry }: FilesSectionProps) {
       loading={loading}
       data={data}
       onRetry={onRetry}
+      onRefresh={onRefresh}
     >
       {(results) => (
         <div className="space-y-1.5">

@@ -123,9 +123,10 @@ interface MeetingsSectionProps {
   loading: boolean;
   data: SectionData | null;
   onRetry?: () => void;
+  onRefresh?: () => void;
 }
 
-export function MeetingsSection({ loading, data, onRetry }: MeetingsSectionProps) {
+export function MeetingsSection({ loading, data, onRetry, onRefresh }: MeetingsSectionProps) {
   return (
     <SectionWrapper
       title="Meeting Recordings"
@@ -133,6 +134,7 @@ export function MeetingsSection({ loading, data, onRetry }: MeetingsSectionProps
       loading={loading}
       data={data}
       onRetry={onRetry}
+      onRefresh={onRefresh}
     >
       {(results) => (
         <div className="space-y-2">

@@ -64,9 +64,10 @@ interface EmailsSectionProps {
   loading: boolean;
   data: SectionData | null;
   onRetry?: () => void;
+  onRefresh?: () => void;
 }
 
-export function EmailsSection({ loading, data, onRetry }: EmailsSectionProps) {
+export function EmailsSection({ loading, data, onRetry, onRefresh }: EmailsSectionProps) {
   return (
     <SectionWrapper
       title="Emails"
@@ -74,6 +75,7 @@ export function EmailsSection({ loading, data, onRetry }: EmailsSectionProps) {
       loading={loading}
       data={data}
       onRetry={onRetry}
+      onRefresh={onRefresh}
     >
       {(results) => (
         <div className="space-y-2">

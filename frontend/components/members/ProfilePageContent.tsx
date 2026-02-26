@@ -36,7 +36,6 @@ export function ProfilePageContent({ personId, personType }: ProfilePageContentP
   const [person, setPerson] = useState<PersonOut | null>(null);
   const [personLoading, setPersonLoading] = useState(true);
   const [limit, setLimit] = useState(15);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const [sections, setSections] = useState<Record<Section, SectionState>>({
     emails: { loading: true, data: null },
@@ -114,26 +113,13 @@ export function ProfilePageContent({ personId, personType }: ProfilePageContentP
     [loadSection]
   );
 
-  // Manual full refresh (invalidates cache server-side)
-  const handleRefresh = useCallback(async () => {
-    const token = await getToken();
-    if (!token || !orgId || isRefreshing) return;
-    setIsRefreshing(true);
-    try {
-      const path =
-        personType === "member"
-          ? `/organizations/${orgId}/members/${personId}/refresh`
-          : `/organizations/${orgId}/employees/${personId}/refresh`;
-      await apiClient.post(path, {}, token);
-      // Re-fetch sections after a brief delay (Celery tasks are dispatched async)
-      setTimeout(() => {
-        loadAllSections(limit);
-        setIsRefreshing(false);
-      }, 1500);
-    } catch {
-      setIsRefreshing(false);
-    }
-  }, [getToken, orgId, personId, personType, limit, loadAllSections, isRefreshing]);
+  // Refresh a single section (re-fetches fresh from the connector)
+  const refreshSection = useCallback(
+    (section: Section) => {
+      loadSection(section, limit);
+    },
+    [loadSection, limit]
+  );
 
   // When limit changes, debounce re-fetch
   const handleLimitChange = useCallback(
@@ -186,12 +172,7 @@ export function ProfilePageContent({ personId, personType }: ProfilePageContentP
       <div className="p-6 max-w-7xl mx-auto space-y-5 pb-10">
         {person && <ProfileHeader person={person} isAdmin={isAdmin} />}
 
-        <LimitControl
-          value={limit}
-          onChange={handleLimitChange}
-          onRefresh={handleRefresh}
-          isRefreshing={isRefreshing}
-        />
+        <LimitControl value={limit} onChange={handleLimitChange} />
 
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5 items-start">
           {/* Left: Data sections — scrolls with the page */}
@@ -200,21 +181,25 @@ export function ProfilePageContent({ personId, personType }: ProfilePageContentP
               loading={sections.emails.loading}
               data={sections.emails.data}
               onRetry={() => loadSection("emails", limit)}
+              onRefresh={() => refreshSection("emails")}
             />
             <FilesSection
               loading={sections.files.loading}
               data={sections.files.data}
               onRetry={() => loadSection("files", limit)}
+              onRefresh={() => refreshSection("files")}
             />
             <SalesforceSection
               loading={sections.salesforce.loading}
               data={sections.salesforce.data}
               onRetry={() => loadSection("salesforce", limit)}
+              onRefresh={() => refreshSection("salesforce")}
             />
             <MeetingsSection
               loading={sections.meetings.loading}
               data={sections.meetings.data}
               onRetry={() => loadSection("meetings", limit)}
+              onRefresh={() => refreshSection("meetings")}
             />
           </div>
 

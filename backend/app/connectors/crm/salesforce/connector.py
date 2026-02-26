@@ -189,6 +189,42 @@ class SalesforceConnector(BaseConnector):
             return resp.status_code == 200
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _run_soql(
+        self,
+        token: str,
+        instance_url: str,
+        soql: str,
+    ) -> dict[str, Any]:
+        """Execute a single SOQL query and return cleaned records."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{instance_url}/services/data/{_API_VERSION}/query",
+                params={"q": soql},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        if resp.status_code == 401:
+            return {"error": "Auth failed — Salesforce token invalid."}
+        if resp.status_code == 403:
+            return {"error": "Permission denied. Check Connected App API permissions."}
+        if not resp.is_success:
+            return {"error": f"Salesforce API error {resp.status_code}: {resp.text[:300]}"}
+
+        data = resp.json()
+        records = data.get("records", [])
+        cleaned = []
+        for rec in records:
+            clean = {k: v for k, v in rec.items() if k != "attributes"}
+            for k, v in list(clean.items()):
+                if isinstance(v, dict) and "attributes" in v:
+                    clean[k] = {ik: iv for ik, iv in v.items() if ik != "attributes"}
+            cleaned.append(clean)
+        return {"records": cleaned, "total": data.get("totalSize", len(cleaned))}
+
+    # ------------------------------------------------------------------
     # Data retrieval
     # ------------------------------------------------------------------
 
@@ -208,36 +244,109 @@ class SalesforceConnector(BaseConnector):
         keyword = _extract_keyword(query)
         soql = _build_soql(sf_object, keyword, limit=limit)
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{instance_url}/services/data/{_API_VERSION}/query",
-                params={"q": soql},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-
-        if resp.status_code == 401:
-            return {"results": [], "source": "salesforce", "error": "Auth failed — Salesforce token invalid."}
-        if resp.status_code == 403:
-            return {"results": [], "source": "salesforce", "error": "Permission denied. Check Connected App API permissions."}
-        if not resp.is_success:
-            return {"results": [], "source": "salesforce", "error": f"Salesforce API error {resp.status_code}: {resp.text[:300]}"}
-
-        data = resp.json()
-        records = data.get("records", [])
-
-        # Strip Salesforce internal metadata from each record
-        cleaned = []
-        for rec in records:
-            clean = {k: v for k, v in rec.items() if k != "attributes"}
-            for k, v in list(clean.items()):
-                if isinstance(v, dict) and "attributes" in v:
-                    clean[k] = {ik: iv for ik, iv in v.items() if ik != "attributes"}
-            cleaned.append(clean)
+        result = await self._run_soql(token, instance_url, soql)
+        if "error" in result:
+            return {"results": [], "source": "salesforce", "error": result["error"]}
 
         return {
-            "results": cleaned,
+            "results": result["records"],
             "source": "salesforce",
             "object_type": sf_object,
-            "total": data.get("totalSize", len(cleaned)),
+            "total": result["total"],
             "searched_for": keyword or f"(recent {sf_object}s)",
+        }
+
+    async def fetch_person_overview(
+        self,
+        credentials: dict[str, Any],
+        person_name: str,
+        work_email: str,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Fetch a multi-object overview for a specific person.
+        Queries opportunities, leads, contacts, tasks, and cases by
+        owner name, contact name, or email — then tags each result
+        with its object_type for the AI summary.
+        """
+        try:
+            fresh = await self.get_org_token()
+            token = fresh["access_token"]
+            instance_url = fresh.get("instance_url", _INSTANCE_URL)
+        except Exception as exc:
+            return {"results": [], "source": "salesforce", "error": f"Failed to get Salesforce token: {exc}"}
+
+        safe_name = person_name.replace("'", "\\'")
+        safe_email = work_email.replace("'", "\\'")
+        per = max(limit // 5, 3)
+
+        queries: dict[str, str] = {
+            "Opportunity": (
+                f"SELECT Id, Name, StageName, Amount, CloseDate, Probability, "
+                f"Account.Name, Owner.Name "
+                f"FROM Opportunity "
+                f"WHERE Owner.Name LIKE '%{safe_name}%' "
+                f"OR Owner.Email = '{safe_email}' "
+                f"ORDER BY LastModifiedDate DESC LIMIT {per}"
+            ),
+            "Lead": (
+                f"SELECT Id, Name, Company, Email, Phone, Status, LeadSource, Rating "
+                f"FROM Lead "
+                f"WHERE Owner.Name LIKE '%{safe_name}%' "
+                f"OR Owner.Email = '{safe_email}' "
+                f"OR Email = '{safe_email}' "
+                f"ORDER BY LastModifiedDate DESC LIMIT {per}"
+            ),
+            "Contact": (
+                f"SELECT Id, Name, Email, Phone, Title, Account.Name, LeadSource "
+                f"FROM Contact "
+                f"WHERE Owner.Name LIKE '%{safe_name}%' "
+                f"OR Owner.Email = '{safe_email}' "
+                f"OR Email = '{safe_email}' "
+                f"ORDER BY LastModifiedDate DESC LIMIT {per}"
+            ),
+            "Task": (
+                f"SELECT Id, Subject, Status, Priority, ActivityDate, "
+                f"Owner.Name, Who.Name "
+                f"FROM Task "
+                f"WHERE Owner.Name LIKE '%{safe_name}%' "
+                f"OR Owner.Email = '{safe_email}' "
+                f"ORDER BY LastModifiedDate DESC LIMIT {per}"
+            ),
+            "Case": (
+                f"SELECT Id, CaseNumber, Subject, Status, Priority, "
+                f"Account.Name, Owner.Name "
+                f"FROM Case "
+                f"WHERE Owner.Name LIKE '%{safe_name}%' "
+                f"OR Owner.Email = '{safe_email}' "
+                f"ORDER BY LastModifiedDate DESC LIMIT {per}"
+            ),
+        }
+
+        import asyncio
+        tasks = {
+            obj: self._run_soql(token, instance_url, soql)
+            for obj, soql in queries.items()
+        }
+        results_map = dict(
+            zip(tasks.keys(), await asyncio.gather(*tasks.values()))
+        )
+
+        all_results: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for obj_type, result in results_map.items():
+            if "error" in result:
+                errors.append(f"{obj_type}: {result['error']}")
+                continue
+            for rec in result["records"]:
+                rec["_object_type"] = obj_type
+                all_results.append(rec)
+
+        return {
+            "results": all_results,
+            "source": "salesforce",
+            "object_type": "overview",
+            "total": len(all_results),
+            "searched_for": f"{person_name} ({work_email})",
+            **({"error": "; ".join(errors)} if errors and not all_results else {}),
         }
