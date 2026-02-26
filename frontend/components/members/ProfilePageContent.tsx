@@ -48,14 +48,19 @@ export function ProfilePageContent({ personId, personType }: ProfilePageContentP
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isAdmin = org?.role === "org_admin";
 
-  // Load person info from the people list
+  // Load person info from the dedicated single-person info endpoint
   const loadPerson = useCallback(async () => {
     const token = await getToken();
     if (!token || !orgId) return;
     try {
-      const people = await apiClient.get<PersonOut[]>(`/organizations/${orgId}/people`, token);
-      const found = people.find((p) => p.id === personId && p.person_type === personType);
-      setPerson(found ?? null);
+      const path =
+        personType === "member"
+          ? `/organizations/${orgId}/members/${personId}/info`
+          : `/organizations/${orgId}/employees/${personId}/info`;
+      const data = await apiClient.get<PersonOut>(path, token);
+      setPerson(data);
+    } catch {
+      setPerson(null);
     } finally {
       setPersonLoading(false);
     }
@@ -152,68 +157,79 @@ export function ProfilePageContent({ personId, personType }: ProfilePageContentP
 
   if (personLoading) {
     return (
-      <div className="p-6 space-y-4 max-w-7xl mx-auto">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-20 rounded-xl" />
+      <div className="h-full overflow-y-auto">
+        <div className="p-6 space-y-4 max-w-7xl mx-auto">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-20 rounded-xl" />
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5">
+            <div className="space-y-5">
+              {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-32 rounded-xl" />)}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
-  if (!person && !personLoading) {
+  if (!person) {
     return (
-      <div className="p-6 text-center text-muted-foreground">
+      <div className="h-full flex items-center justify-center text-muted-foreground">
         Person not found or you don't have access.
       </div>
     );
   }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-5">
-      {person && <ProfileHeader person={person} isAdmin={isAdmin} />}
+    /* h-full + overflow-y-auto makes this div the scroll container inside the
+       dashboard layout's overflow-hidden wrapper */
+    <div className="h-full overflow-y-auto">
+      <div className="p-6 max-w-7xl mx-auto space-y-5 pb-10">
+        {person && <ProfileHeader person={person} isAdmin={isAdmin} />}
 
-      <LimitControl
-        value={limit}
-        onChange={handleLimitChange}
-        onRefresh={handleRefresh}
-        isRefreshing={isRefreshing}
-      />
+        <LimitControl
+          value={limit}
+          onChange={handleLimitChange}
+          onRefresh={handleRefresh}
+          isRefreshing={isRefreshing}
+        />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-5 items-start">
-        {/* Left: Data sections */}
-        <div className="space-y-5 min-w-0">
-          <EmailsSection
-            loading={sections.emails.loading}
-            data={sections.emails.data}
-            onRetry={() => loadSection("emails", limit)}
-          />
-          <FilesSection
-            loading={sections.files.loading}
-            data={sections.files.data}
-            onRetry={() => loadSection("files", limit)}
-          />
-          <SalesforceSection
-            loading={sections.salesforce.loading}
-            data={sections.salesforce.data}
-            onRetry={() => loadSection("salesforce", limit)}
-          />
-          <MeetingsSection
-            loading={sections.meetings.loading}
-            data={sections.meetings.data}
-            onRetry={() => loadSection("meetings", limit)}
-          />
-        </div>
-
-        {/* Right: Sticky chat panel */}
-        <div className="lg:sticky lg:top-4 h-[calc(100vh-8rem)]">
-          {person && orgId && (
-            <MemberChat
-              orgId={orgId}
-              personId={personId}
-              personType={personType}
-              displayName={person.display_name}
-              workEmail={person.work_email}
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5 items-start">
+          {/* Left: Data sections — scrolls with the page */}
+          <div className="space-y-5 min-w-0">
+            <EmailsSection
+              loading={sections.emails.loading}
+              data={sections.emails.data}
+              onRetry={() => loadSection("emails", limit)}
             />
-          )}
+            <FilesSection
+              loading={sections.files.loading}
+              data={sections.files.data}
+              onRetry={() => loadSection("files", limit)}
+            />
+            <SalesforceSection
+              loading={sections.salesforce.loading}
+              data={sections.salesforce.data}
+              onRetry={() => loadSection("salesforce", limit)}
+            />
+            <MeetingsSection
+              loading={sections.meetings.loading}
+              data={sections.meetings.data}
+              onRetry={() => loadSection("meetings", limit)}
+            />
+          </div>
+
+          {/* Right: Chat panel — sticks to the top of the scroll container */}
+          <div className="lg:sticky lg:top-0 h-[calc(100vh-8rem)]">
+            {person && orgId && (
+              <MemberChat
+                orgId={orgId}
+                personId={personId}
+                personType={personType}
+                displayName={person.display_name}
+                workEmail={person.work_email}
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>

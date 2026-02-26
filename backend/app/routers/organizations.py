@@ -617,11 +617,17 @@ async def _handle_section_request(
     db: AsyncSession,
 ) -> SectionResponse:
     """Core logic: check cache → return immediately or fetch live → background refresh if stale."""
-    cached_response, is_stale = await get_section_cache(db, org_id, work_email, section, limit)
+    # Cache lookup is wrapped in try/except: if the member_profile_cache table
+    # doesn't exist yet (migration pending) we fall through to the live fetch.
+    cached_response: SectionResponse | None = None
+    is_stale = False
+    try:
+        cached_response, is_stale = await get_section_cache(db, org_id, work_email, section, limit)
+    except Exception:
+        pass  # Table missing or other DB error — degrade gracefully to live fetch
 
     if cached_response is not None:
         if is_stale:
-            # Serve stale data immediately; trigger background refresh
             try:
                 from app.tasks.member_sync import sync_member_section
                 sync_member_section.delay(str(org_id), work_email, person_name, section)
@@ -630,7 +636,16 @@ async def _handle_section_request(
         return cached_response
 
     # Cache miss — fetch live (same latency as before caching was added)
-    return await _fetch_section_live(org_id, work_email, person_name, section, limit, db)
+    try:
+        return await _fetch_section_live(org_id, work_email, person_name, section, limit, db)
+    except Exception as exc:
+        return SectionResponse(
+            connected=False,
+            results=[],
+            limit=limit,
+            error=f"Failed to load data: {exc}",
+            cache_status="miss",
+        )
 
 
 def _section_endpoint(section_name: str):
@@ -689,6 +704,62 @@ for _section in ("emails", "files", "salesforce", "meetings"):
 
 # ── Manual Cache Refresh ──────────────────────────────────────────────────────
 
+@router.get("/{org_id}/members/{member_id}/info", response_model=PersonOut)
+async def get_member_info(
+    org_id: uuid.UUID,
+    member_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PersonOut:
+    """Return PersonOut for a single org member."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    result = await db.execute(
+        select(OrganizationMember)
+        .options(selectinload(OrganizationMember.user))
+        .where(OrganizationMember.id == member_id, OrganizationMember.org_id == org_id)
+    )
+    m = result.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Member not found")
+    fn = m.user.first_name or ""
+    ln = m.user.last_name or ""
+    return PersonOut(
+        id=m.id, person_type="member",
+        first_name=fn or None, last_name=ln or None,
+        display_name=f"{fn} {ln}".strip() or m.user.email or "Unknown",
+        email=m.user.email, work_email=m.work_email,
+        avatar_url=m.user.avatar_url, role=m.role,
+        is_active=m.is_active, joined_at=m.joined_at,
+    )
+
+
+@router.get("/{org_id}/employees/{employee_id}/info", response_model=PersonOut)
+async def get_employee_info(
+    org_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PersonOut:
+    """Return PersonOut for a single employee."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    result = await db.execute(
+        select(OrgEmployee).where(OrgEmployee.id == employee_id, OrgEmployee.org_id == org_id)
+    )
+    e = result.scalar_one_or_none()
+    if not e:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    name_parts = (e.name or "").split()
+    return PersonOut(
+        id=e.id, person_type="employee",
+        first_name=name_parts[0] if name_parts else None,
+        last_name=" ".join(name_parts[1:]) if len(name_parts) > 1 else None,
+        display_name=e.name or "Unknown",
+        email=None, work_email=e.work_email,
+        avatar_url=None, role=None,
+        is_active=True, joined_at=e.created_at,
+    )
+
+
 def _dispatch_sync_all(org_id_str: str, work_email: str, name: str) -> None:
     """Fire-and-forget: dispatch Celery sync task. Runs after response is sent."""
     try:
@@ -740,86 +811,116 @@ async def refresh_employee_cache(
 
 async def _member_chat_stream(
     org_id: uuid.UUID,
-    work_email: str,
+    work_email: str | None,
     display_name: str,
     body: ChatRequest,
     current_user_id: uuid.UUID,
     db: AsyncSession,
 ) -> StreamingResponse:
-    """Core SSE chat logic with target_user pinned to work_email."""
-    if body.conversation_id:
-        conv_result = await db.execute(
-            select(Conversation).where(
-                Conversation.id == body.conversation_id,
-                Conversation.user_id == current_user_id,
-            )
-        )
-        conv = conv_result.scalar_one_or_none()
-        if not conv:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        msg_result = await db.execute(
-            select(Message)
-            .where(Message.conversation_id == conv.id)
-            .order_by(Message.created_at)
-        )
-        prior_messages = msg_result.scalars().all()
-        history: list[dict] = [{"role": m.role, "content": m.content} for m in prior_messages]
-    else:
-        conv = Conversation(
-            org_id=org_id,
-            user_id=current_user_id,
-            title=f"[{display_name}] {body.message[:50]}",
-        )
-        db.add(conv)
-        await db.flush()
-        history = []
+    """
+    Core SSE chat logic with target_user pinned to work_email.
 
-    history.append({"role": "user", "content": body.message})
-    user_msg = Message(conversation_id=conv.id, role="user", content=body.message)
-    db.add(user_msg)
-    await db.flush()
-
-    connected = await load_connected_integrations(org_id, db)
-    target_keys = detect_connectors(body.message) or None
-
-    # Override all target_user injections with the pinned email
-    for integration in connected:
-        if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
-            integration["credentials"]["target_user"] = work_email
-
-    # Build org_members list so the AI context knows who this is
-    org_members = [{"first_name": display_name.split()[0], "last_name": "", "work_email": work_email}]
-
-    connector_results = await fetch_all_connector_data(
-        connected, body.message, target_keys, org_members=org_members,
-        history=history[:-1],
-    )
-
-    person_context = (
-        f"You are answering questions specifically about {display_name} ({work_email}). "
-        "All connector data below is scoped to this person. "
-        "Cite sources clearly and be concise."
-    )
+    All heavy work (DB, connectors, LLM) is done INSIDE the generator so that
+    the HTTP 200 + SSE headers are sent immediately.  Errors are communicated
+    via a `data: [ERROR] …` event so the frontend always gets a clean response.
+    """
+    # Snapshot everything we need from the request before yielding control.
+    conversation_id = body.conversation_id
+    message_text = body.message
 
     async def _event_stream() -> AsyncIterator[bytes]:
-        yield f"data: [CONV_ID:{conv.id}]\n\n".encode()
-        full_response = []
-        async for chunk in stream_chat_response(
-            [{"role": "system", "content": person_context}] + history,
-            connector_results,
-        ):
-            full_response.append(chunk)
-            yield f"data: {json.dumps(chunk)}\n\n".encode()
-        assistant_content = "".join(full_response)
-        sources = [r.get("connector") for r in connector_results if "error" not in r]
-        assistant_msg = Message(
-            conversation_id=conv.id,
-            role="assistant",
-            content=assistant_content,
-            metadata_={"sources": sources},
-        )
-        db.add(assistant_msg)
-        await db.commit()
+        try:
+            # ── 1. Resolve or create conversation ──────────────────────────
+            if conversation_id:
+                conv_result = await db.execute(
+                    select(Conversation).where(
+                        Conversation.id == conversation_id,
+                        Conversation.user_id == current_user_id,
+                    )
+                )
+                conv = conv_result.scalar_one_or_none()
+                if not conv:
+                    yield b"data: [ERROR] Conversation not found.\n\n"
+                    return
+                msg_result = await db.execute(
+                    select(Message)
+                    .where(Message.conversation_id == conv.id)
+                    .order_by(Message.created_at)
+                )
+                history: list[dict] = [
+                    {"role": m.role, "content": m.content}
+                    for m in msg_result.scalars().all()
+                ]
+            else:
+                conv = Conversation(
+                    org_id=org_id,
+                    user_id=current_user_id,
+                    title=f"[{display_name}] {message_text[:50]}",
+                )
+                db.add(conv)
+                await db.flush()
+                history = []
+
+            # Emit conversation ID first so the frontend can thread follow-ups
+            yield f"data: [CONV_ID:{conv.id}]\n\n".encode()
+
+            history.append({"role": "user", "content": message_text})
+            user_msg = Message(conversation_id=conv.id, role="user", content=message_text)
+            db.add(user_msg)
+            await db.flush()
+
+            # ── 2. Fetch connector data ─────────────────────────────────────
+            connected = await load_connected_integrations(org_id, db)
+            target_keys = detect_connectors(message_text) or None
+
+            if work_email:
+                for integration in connected:
+                    if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
+                        integration["credentials"]["target_user"] = work_email
+
+            org_members = [
+                {"first_name": display_name.split()[0], "last_name": "", "work_email": work_email or ""}
+            ]
+
+            connector_results = await fetch_all_connector_data(
+                connected, message_text, target_keys,
+                org_members=org_members, history=history[:-1],
+            )
+
+            # ── 3. Stream LLM response ──────────────────────────────────────
+            person_context = (
+                f"You are answering questions specifically about {display_name}"
+                + (f" ({work_email})" if work_email else "")
+                + ". All connector data below is scoped to this person. "
+                "Cite sources clearly and be concise."
+            )
+
+            full_response: list[str] = []
+            async for chunk in stream_chat_response(
+                [{"role": "system", "content": person_context}] + history,
+                connector_results,
+            ):
+                full_response.append(chunk)
+                yield f"data: {json.dumps(chunk)}\n\n".encode()
+
+            # ── 4. Persist assistant turn ───────────────────────────────────
+            assistant_content = "".join(full_response)
+            sources = [r.get("connector") for r in connector_results if "error" not in r]
+            db.add(Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content=assistant_content or "(no response)",
+                metadata_={"sources": sources},
+            ))
+            await db.commit()
+
+        except Exception as exc:
+            yield f"data: [ERROR] {str(exc)}\n\n".encode()
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
         yield b"data: [DONE]\n\n"
 
     return StreamingResponse(_event_stream(), media_type="text/event-stream")

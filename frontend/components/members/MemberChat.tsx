@@ -80,12 +80,14 @@ export function MemberChat({ orgId, personId, personType, displayName, workEmail
         });
 
         if (!res.ok || !res.body) {
+          let detail = "Something went wrong. Please try again.";
+          try {
+            const errBody = await res.json();
+            detail = errBody?.detail ?? detail;
+          } catch { /* ignore parse error */ }
           setMessages((prev) => {
             const copy = [...prev];
-            copy[copy.length - 1] = {
-              role: "assistant",
-              content: "Sorry, something went wrong. Please try again.",
-            };
+            copy[copy.length - 1] = { role: "assistant", content: detail };
             return copy;
           });
           return;
@@ -112,6 +114,16 @@ export function MemberChat({ orgId, personId, personType, displayName, workEmail
               setConversationId(id);
               continue;
             }
+            // Server-side error event
+            if (data.startsWith("[ERROR]")) {
+              const errMsg = data.slice(7).trim() || "Something went wrong. Please try again.";
+              setMessages((prev) => {
+                const copy = [...prev];
+                copy[copy.length - 1] = { role: "assistant", content: errMsg };
+                return copy;
+              });
+              return;
+            }
             try {
               const chunk: string = JSON.parse(data);
               full += chunk;
@@ -121,7 +133,7 @@ export function MemberChat({ orgId, personId, personType, displayName, workEmail
                 return copy;
               });
             } catch {
-              // skip malformed
+              // skip malformed chunks
             }
           }
         }
