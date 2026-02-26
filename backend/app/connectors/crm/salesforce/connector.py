@@ -1,16 +1,18 @@
 """
-Salesforce CRM connector.
+Salesforce CRM connector — Org-level client credentials flow.
 
-Supports both production (login.salesforce.com) and sandbox
-(test.salesforce.com) via the SALESFORCE_LOGIN_DOMAIN env var.
+No user OAuth redirect required. Uses the Connected App's Consumer Key +
+Consumer Secret to get a bearer token directly from the instance's token
+endpoint (same pattern as Microsoft 365 / OneDrive / Teams connectors).
 
-OAuth flow:
-  1. User clicks Connect → redirected to Salesforce login
-  2. Salesforce redirects back with code + instance_url in the token response
-  3. instance_url is stored in raw_data and used for all subsequent API calls
+Requires in .env:
+  SALESFORCE_CLIENT_ID      — Consumer Key from the Connected App
+  SALESFORCE_CLIENT_SECRET  — Consumer Secret from the Connected App
+  SALESFORCE_INSTANCE_URL   — e.g. https://nailbiter--uat.sandbox.my.salesforce.com
+  SALESFORCE_TOKEN_URL      — e.g. https://nailbiter--uat.sandbox.my.salesforce.com/services/oauth2/token
 
-Queries Opportunities, Contacts, Accounts, and Leads via SOQL based on
-the user's natural language prompt.
+Queries Opportunities, Contacts, Accounts, Leads, Cases, and Tasks via
+SOQL based on the user's natural language prompt.
 """
 
 import os
@@ -20,28 +22,27 @@ from typing import Any
 import httpx
 
 from app.connectors.base import BaseConnector, ConnectorMetadata
-from app.connectors.oauth_manager import build_authorization_url, compute_expires_at
 
 _CLIENT_ID = os.getenv("SALESFORCE_CLIENT_ID", "")
 _CLIENT_SECRET = os.getenv("SALESFORCE_CLIENT_SECRET", "")
-# "test.salesforce.com" for sandbox, "login.salesforce.com" for production
-_LOGIN_DOMAIN = os.getenv("SALESFORCE_LOGIN_DOMAIN", "login.salesforce.com")
-_AUTH_URL = f"https://{_LOGIN_DOMAIN}/services/oauth2/authorize"
-_TOKEN_URL = f"https://{_LOGIN_DOMAIN}/services/oauth2/token"
-_API_VERSION = "v59.0"
+_INSTANCE_URL = os.getenv("SALESFORCE_INSTANCE_URL", "")
+_TOKEN_URL = os.getenv(
+    "SALESFORCE_TOKEN_URL",
+    f"{_INSTANCE_URL}/services/oauth2/token" if _INSTANCE_URL else "",
+)
+_API_VERSION = "v62.0"
 
 _INTENT = {
-    "opportunity": ["deal", "deals", "opportunity", "opportunities", "pipeline", "stage", "close", "revenue", "amount"],
+    "opportunity": ["deal", "deals", "opportunity", "opportunities", "pipeline", "stage", "close", "revenue", "amount", "won", "lost"],
     "contact": ["contact", "contacts", "person", "email", "phone", "who"],
     "account": ["account", "accounts", "company", "companies", "customer", "client", "organization"],
-    "lead": ["lead", "leads", "prospect", "prospects", "new lead"],
+    "lead": ["lead", "leads", "prospect", "prospects"],
     "case": ["case", "cases", "support", "ticket", "issue"],
-    "task": ["task", "tasks", "activity", "activities", "follow", "followup"],
+    "task": ["task", "tasks", "activity", "activities", "followup", "follow up"],
 }
 
 
 def _detect_object(query: str) -> str:
-    """Return the most relevant Salesforce object for the query."""
     lower = query.lower()
     scores: dict[str, int] = {obj: 0 for obj in _INTENT}
     for obj, keywords in _INTENT.items():
@@ -53,15 +54,17 @@ def _detect_object(query: str) -> str:
 
 
 def _extract_keyword(query: str) -> str:
-    """Pull a useful search term from the query (strip common navigation words)."""
     stop = {
         "show", "get", "find", "list", "fetch", "all", "my", "the", "for",
         "in", "of", "from", "about", "what", "are", "salesforce", "crm",
         "can", "you", "please", "open", "deal", "deals", "opportunity",
-        "contact", "account", "lead", "latest", "recent",
+        "opportunities", "contact", "contacts", "account", "accounts",
+        "lead", "leads", "latest", "recent", "give",
     }
-    parts = [w for w in re.sub(r"[^\w\s@.]", "", query).lower().split()
-             if w not in stop and "@" not in w and len(w) > 2 and not w.isdigit()]
+    parts = [
+        w for w in re.sub(r"[^\w\s@.]", "", query).lower().split()
+        if w not in stop and "@" not in w and len(w) > 2 and not w.isdigit()
+    ]
     return " ".join(parts[:3])
 
 
@@ -72,11 +75,10 @@ def _build_soql(obj: str, keyword: str, limit: int = 15) -> str:
         where = f"Name LIKE '%{kw}%' OR Account.Name LIKE '%{kw}%'" if kw else "IsClosed = false"
         return (
             f"SELECT Id, Name, StageName, Amount, CloseDate, Probability, "
-            f"Account.Name, OwnerId, Owner.Name "
+            f"Account.Name, Owner.Name "
             f"FROM Opportunity WHERE {where} "
             f"ORDER BY LastModifiedDate DESC LIMIT {limit}"
         )
-
     if obj == "contact":
         where = (
             f"Name LIKE '%{kw}%' OR Email LIKE '%{kw}%' OR Account.Name LIKE '%{kw}%'"
@@ -87,7 +89,6 @@ def _build_soql(obj: str, keyword: str, limit: int = 15) -> str:
             f"FROM Contact WHERE {where} "
             f"ORDER BY LastModifiedDate DESC LIMIT {limit}"
         )
-
     if obj == "account":
         where = f"Name LIKE '%{kw}%' OR Industry LIKE '%{kw}%'" if kw else "Id != null"
         return (
@@ -96,31 +97,30 @@ def _build_soql(obj: str, keyword: str, limit: int = 15) -> str:
             f"FROM Account WHERE {where} "
             f"ORDER BY LastModifiedDate DESC LIMIT {limit}"
         )
-
     if obj == "lead":
-        where = f"Name LIKE '%{kw}%' OR Company LIKE '%{kw}%' OR Email LIKE '%{kw}%'" if kw else "IsConverted = false"
+        where = (
+            f"Name LIKE '%{kw}%' OR Company LIKE '%{kw}%' OR Email LIKE '%{kw}%'"
+            if kw else "IsConverted = false"
+        )
         return (
             f"SELECT Id, Name, Company, Email, Phone, Status, LeadSource, Rating "
             f"FROM Lead WHERE {where} "
             f"ORDER BY LastModifiedDate DESC LIMIT {limit}"
         )
-
     if obj == "case":
-        where = f"Subject LIKE '%{kw}%' OR Description LIKE '%{kw}%'" if kw else "IsClosed = false"
+        where = f"Subject LIKE '%{kw}%'" if kw else "IsClosed = false"
         return (
             f"SELECT Id, CaseNumber, Subject, Status, Priority, Account.Name "
             f"FROM Case WHERE {where} "
             f"ORDER BY LastModifiedDate DESC LIMIT {limit}"
         )
-
     if obj == "task":
         where = f"Subject LIKE '%{kw}%'" if kw else "IsClosed = false"
         return (
-            f"SELECT Id, Subject, Status, Priority, ActivityDate, Who.Name, What.Name "
+            f"SELECT Id, Subject, Status, Priority, ActivityDate "
             f"FROM Task WHERE {where} "
             f"ORDER BY LastModifiedDate DESC LIMIT {limit}"
         )
-
     return f"SELECT Id, Name FROM {obj.capitalize()} LIMIT {limit}"
 
 
@@ -129,92 +129,78 @@ class SalesforceConnector(BaseConnector):
         key="salesforce",
         name="Salesforce",
         category="crm",
-        auth_type="oauth2",
+        auth_type="client_credentials",
         scope="org",
-        description="Connect your Salesforce CRM to query deals, contacts, accounts, leads, and more.",
+        description="Connect your Salesforce org to query deals, contacts, accounts, leads, and more via AI chat.",
         icon_url="/icons/salesforce.svg",
-        oauth_scopes=["api", "refresh_token", "offline_access"],
-        oauth_config={
-            "auth_url": _AUTH_URL,
-            "token_url": _TOKEN_URL,
-        },
+        oauth_scopes=[],
+        oauth_config={},
     )
 
+    # ------------------------------------------------------------------
+    # Client credentials — no user redirect
+    # ------------------------------------------------------------------
+
+    async def get_org_token(self) -> dict[str, Any]:
+        """Fetch a fresh access token using the client credentials flow."""
+        if not _CLIENT_ID or not _CLIENT_SECRET or not _TOKEN_URL:
+            raise RuntimeError(
+                "SALESFORCE_CLIENT_ID, SALESFORCE_CLIENT_SECRET, and "
+                "SALESFORCE_TOKEN_URL must be set in .env"
+            )
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                _TOKEN_URL,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": _CLIENT_ID,
+                    "client_secret": _CLIENT_SECRET,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "access_token": data["access_token"],
+                "instance_url": data.get("instance_url", _INSTANCE_URL),
+                "token_type": data.get("token_type", "Bearer"),
+            }
+
     async def get_oauth_url(self, state: str, redirect_uri: str) -> str:
-        return build_authorization_url(
-            auth_url=_AUTH_URL,
-            client_id=_CLIENT_ID,
-            redirect_uri=redirect_uri,
-            scopes=self.metadata.oauth_scopes,
-            state=state,
-        )
+        raise NotImplementedError("Salesforce uses client credentials — no OAuth redirect")
 
     async def exchange_code(self, code: str, redirect_uri: str) -> dict[str, Any]:
-        """Exchange authorization code for tokens. Salesforce returns instance_url in the response."""
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                _TOKEN_URL,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "client_id": _CLIENT_ID,
-                    "client_secret": _CLIENT_SECRET,
-                    "redirect_uri": redirect_uri,
-                },
-            )
-            resp.raise_for_status()
-            tokens = resp.json()
-
-        tokens["expires_at"] = compute_expires_at(tokens.get("expires_in"))
-        # instance_url comes directly from Salesforce — store it for later API calls
-        return tokens
+        raise NotImplementedError("Salesforce uses client credentials — no OAuth redirect")
 
     async def refresh_token(self, credentials: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                _TOKEN_URL,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": credentials["refresh_token"],
-                    "client_id": _CLIENT_ID,
-                    "client_secret": _CLIENT_SECRET,
-                },
-            )
-            resp.raise_for_status()
-            tokens = resp.json()
-
-        tokens["expires_at"] = compute_expires_at(tokens.get("expires_in"))
-        # Preserve existing instance_url if not returned again
-        if "instance_url" not in tokens and "instance_url" in credentials:
-            tokens["instance_url"] = credentials["instance_url"]
-        return tokens
+        return await self.get_org_token()
 
     async def test_connection(self, credentials: dict[str, Any]) -> bool:
-        instance_url = credentials.get("instance_url") or os.getenv("SALESFORCE_INSTANCE_URL", "")
-        if not instance_url:
-            return False
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    f"{instance_url}/services/data/{_API_VERSION}/",
-                    headers={"Authorization": f"Bearer {credentials['access_token']}"},
-                )
-                return resp.status_code == 200
+            fresh = await self.get_org_token()
+            token = fresh["access_token"]
+            instance_url = fresh.get("instance_url", _INSTANCE_URL)
         except Exception:
             return False
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{instance_url}/services/data/{_API_VERSION}/",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            return resp.status_code == 200
+
+    # ------------------------------------------------------------------
+    # Data retrieval
+    # ------------------------------------------------------------------
 
     async def fetch_data(self, credentials: dict[str, Any], query: str) -> dict[str, Any]:
-        """Run an intent-aware SOQL query and return structured results."""
-        instance_url = (
-            credentials.get("instance_url")
-            or os.getenv("SALESFORCE_INSTANCE_URL", "")
-        )
-        if not instance_url:
-            return {"results": [], "source": "salesforce", "error": "No Salesforce instance URL configured."}
+        try:
+            fresh = await self.get_org_token()
+            token = fresh["access_token"]
+            instance_url = fresh.get("instance_url", _INSTANCE_URL)
+        except Exception as exc:
+            return {"results": [], "source": "salesforce", "error": f"Failed to get Salesforce token: {exc}"}
 
-        access_token = credentials.get("access_token", "")
-
-        # Parse a count from the query ("latest 10 deals" → 10)
+        # Parse explicit count ("show 10 deals" → LIMIT 10)
         count_match = re.search(r"\b(\d+)\b", query)
         limit = min(int(count_match.group(1)), 50) if count_match else 15
 
@@ -226,24 +212,23 @@ class SalesforceConnector(BaseConnector):
             resp = await client.get(
                 f"{instance_url}/services/data/{_API_VERSION}/query",
                 params={"q": soql},
-                headers={"Authorization": f"Bearer {access_token}"},
+                headers={"Authorization": f"Bearer {token}"},
             )
 
         if resp.status_code == 401:
-            return {"results": [], "source": "salesforce", "error": "Auth failed — token may have expired. Please reconnect Salesforce."}
+            return {"results": [], "source": "salesforce", "error": "Auth failed — Salesforce token invalid."}
         if resp.status_code == 403:
-            return {"results": [], "source": "salesforce", "error": "Permission denied. Check that the Connected App has the required API permissions."}
+            return {"results": [], "source": "salesforce", "error": "Permission denied. Check Connected App API permissions."}
         if not resp.is_success:
             return {"results": [], "source": "salesforce", "error": f"Salesforce API error {resp.status_code}: {resp.text[:300]}"}
 
         data = resp.json()
         records = data.get("records", [])
 
-        # Clean up internal Salesforce metadata fields from each record
+        # Strip Salesforce internal metadata from each record
         cleaned = []
         for rec in records:
-            clean = {k: v for k, v in rec.items() if k not in ("attributes",) and not k.startswith("__")}
-            # Flatten nested objects (e.g. Account.Name)
+            clean = {k: v for k, v in rec.items() if k != "attributes"}
             for k, v in list(clean.items()):
                 if isinstance(v, dict) and "attributes" in v:
                     clean[k] = {ik: iv for ik, iv in v.items() if ik != "attributes"}
