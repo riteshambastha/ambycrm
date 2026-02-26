@@ -1,17 +1,22 @@
+import json
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import CurrentUser, get_current_org_membership, require_org_admin
+from app.config import settings
 from app.database import get_db
+from app.models.conversation import Conversation, Message
 from app.models.organization import Invitation, OrgEmployee, Organization, OrganizationMember
 from app.models.user import User
+from app.schemas.chat import ChatRequest
 from app.schemas.organization import (
     InvitationOut,
     InviteCreate,
@@ -21,10 +26,22 @@ from app.schemas.organization import (
     OrganizationCreate,
     OrganizationOut,
     OrganizationUpdate,
+    PersonOut,
+    SectionResponse,
     WorkEmailUpdate,
 )
+from app.services.ai_service import detect_connectors, fetch_all_connector_data, stream_chat_response
+from app.services.cache_service import (
+    get_section_cache,
+    invalidate_member_cache,
+    store_section_cache,
+)
 from app.services.email_service import send_invitation_email
-from app.config import settings
+from app.services.integration_service import (
+    SECTION_CONNECTOR_KEYS,
+    is_connector_connected,
+    load_connected_integrations,
+)
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
 
@@ -104,6 +121,14 @@ async def list_members(
         .where(OrganizationMember.org_id == org_id)
     )
     members = result.scalars().all()
+
+    # Kick off background pre-caching for all members (fire-and-forget)
+    try:
+        from app.tasks.member_sync import precache_org_members
+        precache_org_members.delay(str(org_id))
+    except Exception:
+        pass  # Never fail the request if Celery is unavailable
+
     return [
         MemberOut(
             id=m.id,
@@ -119,6 +144,66 @@ async def list_members(
         )
         for m in members
     ]
+
+
+@router.get("/{org_id}/people", response_model=list[PersonOut])
+async def list_people(
+    org_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[PersonOut]:
+    """Unified people directory combining OrganizationMembers and OrgEmployees."""
+    await get_current_org_membership(str(org_id), current_user, db)
+
+    member_result = await db.execute(
+        select(OrganizationMember)
+        .options(selectinload(OrganizationMember.user))
+        .where(OrganizationMember.org_id == org_id)
+    )
+    employee_result = await db.execute(
+        select(OrgEmployee).where(OrgEmployee.org_id == org_id).order_by(OrgEmployee.name)
+    )
+
+    people: list[PersonOut] = []
+    for m in member_result.scalars().all():
+        fn = m.user.first_name or ""
+        ln = m.user.last_name or ""
+        people.append(PersonOut(
+            id=m.id,
+            person_type="member",
+            first_name=fn or None,
+            last_name=ln or None,
+            display_name=f"{fn} {ln}".strip() or m.user.email or "Unknown",
+            email=m.user.email,
+            work_email=m.work_email,
+            avatar_url=m.user.avatar_url,
+            role=m.role,
+            is_active=m.is_active,
+            joined_at=m.joined_at,
+        ))
+    for e in employee_result.scalars().all():
+        people.append(PersonOut(
+            id=e.id,
+            person_type="employee",
+            first_name=e.name.split()[0] if e.name else None,
+            last_name=" ".join(e.name.split()[1:]) if e.name and len(e.name.split()) > 1 else None,
+            display_name=e.name,
+            email=None,
+            work_email=e.work_email,
+            avatar_url=None,
+            role=None,
+            is_active=True,
+            joined_at=e.created_at,
+        ))
+
+    # Trigger background pre-caching
+    try:
+        from app.tasks.member_sync import precache_org_members
+        precache_org_members.delay(str(org_id))
+    except Exception:
+        pass
+
+    return people
 
 
 @router.patch("/{org_id}/members/{member_id}/deactivate", response_model=MemberOut)
@@ -345,3 +430,424 @@ async def remove_employee(
         raise HTTPException(status_code=404, detail="Employee not found")
     await db.delete(employee)
     await db.flush()
+
+
+# ── Member Profile Sections ───────────────────────────────────────────────────
+
+# Pre-configured queries per section
+_SECTION_QUERIES: dict[str, str] = {
+    "emails": (
+        "Show the latest {limit} emails. "
+        "Highlight urgent threads, pending replies, and required action items."
+    ),
+    "files": (
+        "List the latest {limit} OneDrive or Drive files. "
+        "Note recently modified documents and any shared or collaborative files."
+    ),
+    "salesforce": (
+        "Show activities, open opportunities, contacts, and accounts related to "
+        "{name} ({work_email}). Highlight overdue tasks, hot deals, and key relationships."
+    ),
+    "meetings": (
+        "Show the latest {limit} meeting recordings. "
+        "Include transcript summaries, key decisions, and action items for each."
+    ),
+}
+
+_SECTION_SYSTEM_PROMPTS: dict[str, str] = {
+    "emails": (
+        "You are summarizing someone's recent emails for a manager or colleague. "
+        "Extract the most important themes in 3–5 bullet points: "
+        "urgent items, pending action items, key senders, and important threads. "
+        "Be concise, specific, and directly actionable. No preamble."
+    ),
+    "files": (
+        "You are summarizing recently active files for a manager or colleague. "
+        "Highlight in 3–4 bullet points: recently modified documents, what they likely "
+        "contain based on their names, and any that may need attention. "
+        "Be concise and actionable. No preamble."
+    ),
+    "salesforce": (
+        "You are summarizing CRM data for a manager or colleague. "
+        "In 4–5 bullet points summarize: pipeline health, overdue activities, "
+        "key relationships, and anything time-sensitive. "
+        "Flag risks and opportunities explicitly. No preamble."
+    ),
+    "meetings": (
+        "You are summarizing recent meeting recordings for a manager or colleague. "
+        "In 4–5 bullet points synthesize: recurring meeting themes, key decisions made, "
+        "and open action items across all recordings. "
+        "Be concise and actionable. No preamble."
+    ),
+}
+
+
+async def _fetch_section_live(
+    org_id: uuid.UUID,
+    work_email: str,
+    person_name: str,
+    section: str,
+    limit: int,
+    db: AsyncSession,
+) -> SectionResponse:
+    """
+    Synchronously fetch a section from the connector(s) and generate an AI summary.
+    Called on cache miss. Result is stored to cache before returning.
+    """
+    import litellm
+
+    connector_keys = SECTION_CONNECTOR_KEYS.get(section, [])
+    connected = await load_connected_integrations(org_id, db)
+
+    if not is_connector_connected(connected, connector_keys):
+        return SectionResponse(connected=False, results=[], limit=limit, cache_status="miss")
+
+    query = _SECTION_QUERIES[section].format(
+        limit=settings.CACHE_MAX_ITEMS,
+        name=person_name,
+        work_email=work_email,
+    )
+
+    import asyncio as _asyncio
+    from app.services.ai_service import fetch_connector_data
+
+    active = [i for i in connected if i["connector_key"] in connector_keys]
+    tasks = []
+    connector_key_used = active[0]["connector_key"] if active else "unknown"
+    for integration in active:
+        creds = dict(integration["credentials"])
+        if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
+            creds["target_user"] = work_email
+        tasks.append(fetch_connector_data(integration["connector_key"], creds, query))
+
+    results_list = await _asyncio.gather(*tasks)
+    all_results = []
+    for r in results_list:
+        if "error" not in r:
+            all_results.extend(r.get("results", []))
+            connector_key_used = r.get("connector", connector_key_used)
+
+    # Generate AI summary
+    summary: str | None = None
+    if all_results:
+        data_text = json.dumps(all_results, default=str)[:8000]
+        system_prompt = _SECTION_SYSTEM_PROMPTS.get(section, "Summarize this data.")
+        try:
+            llm_resp = await litellm.acompletion(
+                model=settings.DEFAULT_LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Data:\n{data_text}\n\nProvide an actionable summary."},
+                ],
+                max_tokens=400,
+                api_key=settings.OPENAI_API_KEY or settings.ANTHROPIC_API_KEY,
+            )
+            summary = llm_resp.choices[0].message.content or None
+        except Exception:
+            pass
+
+    # Store to cache (fire-and-forget style — we're already async so just await)
+    try:
+        await store_section_cache(
+            db=db,
+            org_id=org_id,
+            work_email=work_email,
+            section=section,
+            connector_key=connector_key_used,
+            results=all_results,
+            summary=summary,
+        )
+    except Exception:
+        pass
+
+    from datetime import datetime, timezone
+    return SectionResponse(
+        connected=True,
+        results=all_results[:limit],
+        summary=summary,
+        limit=limit,
+        cached=False,
+        fetched_at=datetime.now(timezone.utc),
+        cache_status="miss",
+    )
+
+
+async def _get_member_work_info(
+    org_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db: AsyncSession,
+) -> tuple[str, str] | None:
+    """Return (work_email, display_name) for a member, or None if not found/no work_email."""
+    result = await db.execute(
+        select(OrganizationMember)
+        .options(selectinload(OrganizationMember.user))
+        .where(OrganizationMember.id == member_id, OrganizationMember.org_id == org_id)
+    )
+    m = result.scalar_one_or_none()
+    if not m or not m.work_email:
+        return None
+    name = f"{m.user.first_name or ''} {m.user.last_name or ''}".strip() or m.work_email
+    return m.work_email, name
+
+
+async def _get_employee_work_info(
+    org_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    db: AsyncSession,
+) -> tuple[str, str] | None:
+    """Return (work_email, display_name) for an employee, or None if not found."""
+    result = await db.execute(
+        select(OrgEmployee).where(OrgEmployee.id == employee_id, OrgEmployee.org_id == org_id)
+    )
+    e = result.scalar_one_or_none()
+    if not e:
+        return None
+    return e.work_email, e.name
+
+
+async def _handle_section_request(
+    org_id: uuid.UUID,
+    work_email: str,
+    person_name: str,
+    section: str,
+    limit: int,
+    db: AsyncSession,
+) -> SectionResponse:
+    """Core logic: check cache → return immediately or fetch live → background refresh if stale."""
+    cached_response, is_stale = await get_section_cache(db, org_id, work_email, section, limit)
+
+    if cached_response is not None:
+        if is_stale:
+            # Serve stale data immediately; trigger background refresh
+            try:
+                from app.tasks.member_sync import sync_member_section
+                sync_member_section.delay(str(org_id), work_email, person_name, section)
+            except Exception:
+                pass
+        return cached_response
+
+    # Cache miss — fetch live (same latency as before caching was added)
+    return await _fetch_section_live(org_id, work_email, person_name, section, limit, db)
+
+
+def _section_endpoint(section_name: str):
+    """Factory that creates a section endpoint handler for member or employee."""
+    async def _member_handler(
+        org_id: uuid.UUID,
+        member_id: uuid.UUID,
+        current_user: CurrentUser,
+        db: Annotated[AsyncSession, Depends(get_db)],
+        limit: int = Query(default=15, ge=1, le=50),
+    ) -> SectionResponse:
+        await get_current_org_membership(str(org_id), current_user, db)
+        info = await _get_member_work_info(org_id, member_id, db)
+        if info is None:
+            return SectionResponse(
+                connected=False,
+                results=[],
+                limit=limit,
+                error="No work email set for this member. Set it in Settings → Members.",
+                cache_status="miss",
+            )
+        work_email, name = info
+        return await _handle_section_request(org_id, work_email, name, section_name, limit, db)
+
+    async def _employee_handler(
+        org_id: uuid.UUID,
+        employee_id: uuid.UUID,
+        current_user: CurrentUser,
+        db: Annotated[AsyncSession, Depends(get_db)],
+        limit: int = Query(default=15, ge=1, le=50),
+    ) -> SectionResponse:
+        await get_current_org_membership(str(org_id), current_user, db)
+        info = await _get_employee_work_info(org_id, employee_id, db)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        work_email, name = info
+        return await _handle_section_request(org_id, work_email, name, section_name, limit, db)
+
+    return _member_handler, _employee_handler
+
+
+# Register section endpoints for members and employees
+for _section in ("emails", "files", "salesforce", "meetings"):
+    _member_fn, _employee_fn = _section_endpoint(_section)
+    router.get(
+        f"/{{org_id}}/members/{{member_id}}/sections/{_section}",
+        response_model=SectionResponse,
+        tags=["member-sections"],
+    )(_member_fn)
+    router.get(
+        f"/{{org_id}}/employees/{{employee_id}}/sections/{_section}",
+        response_model=SectionResponse,
+        tags=["member-sections"],
+    )(_employee_fn)
+
+
+# ── Manual Cache Refresh ──────────────────────────────────────────────────────
+
+@router.post("/{org_id}/members/{member_id}/refresh", status_code=202)
+async def refresh_member_cache(
+    org_id: uuid.UUID,
+    member_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Invalidate and re-fetch all cached sections for a member."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    info = await _get_member_work_info(org_id, member_id, db)
+    if info is None:
+        raise HTTPException(status_code=400, detail="No work email set for this member.")
+    work_email, name = info
+    await invalidate_member_cache(db, org_id, work_email)
+    try:
+        from app.tasks.member_sync import sync_member_all_sections
+        sync_member_all_sections.delay(str(org_id), work_email, name)
+    except Exception:
+        pass
+    return {"status": "refreshing"}
+
+
+@router.post("/{org_id}/employees/{employee_id}/refresh", status_code=202)
+async def refresh_employee_cache(
+    org_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """Invalidate and re-fetch all cached sections for an employee."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    info = await _get_employee_work_info(org_id, employee_id, db)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    work_email, name = info
+    await invalidate_member_cache(db, org_id, work_email)
+    try:
+        from app.tasks.member_sync import sync_member_all_sections
+        sync_member_all_sections.delay(str(org_id), work_email, name)
+    except Exception:
+        pass
+    return {"status": "refreshing"}
+
+
+# ── Member-Scoped Chat (pinned target_user) ───────────────────────────────────
+
+async def _member_chat_stream(
+    org_id: uuid.UUID,
+    work_email: str,
+    display_name: str,
+    body: ChatRequest,
+    current_user_id: uuid.UUID,
+    db: AsyncSession,
+) -> StreamingResponse:
+    """Core SSE chat logic with target_user pinned to work_email."""
+    if body.conversation_id:
+        conv_result = await db.execute(
+            select(Conversation).where(
+                Conversation.id == body.conversation_id,
+                Conversation.user_id == current_user_id,
+            )
+        )
+        conv = conv_result.scalar_one_or_none()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        msg_result = await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conv.id)
+            .order_by(Message.created_at)
+        )
+        prior_messages = msg_result.scalars().all()
+        history: list[dict] = [{"role": m.role, "content": m.content} for m in prior_messages]
+    else:
+        conv = Conversation(
+            org_id=org_id,
+            user_id=current_user_id,
+            title=f"[{display_name}] {body.message[:50]}",
+        )
+        db.add(conv)
+        await db.flush()
+        history = []
+
+    history.append({"role": "user", "content": body.message})
+    user_msg = Message(conversation_id=conv.id, role="user", content=body.message)
+    db.add(user_msg)
+    await db.flush()
+
+    connected = await load_connected_integrations(org_id, db)
+    target_keys = detect_connectors(body.message) or None
+
+    # Override all target_user injections with the pinned email
+    for integration in connected:
+        if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
+            integration["credentials"]["target_user"] = work_email
+
+    # Build org_members list so the AI context knows who this is
+    org_members = [{"first_name": display_name.split()[0], "last_name": "", "work_email": work_email}]
+
+    connector_results = await fetch_all_connector_data(
+        connected, body.message, target_keys, org_members=org_members,
+        history=history[:-1],
+    )
+
+    person_context = (
+        f"You are answering questions specifically about {display_name} ({work_email}). "
+        "All connector data below is scoped to this person. "
+        "Cite sources clearly and be concise."
+    )
+
+    async def _event_stream() -> AsyncIterator[bytes]:
+        yield f"data: [CONV_ID:{conv.id}]\n\n".encode()
+        full_response = []
+        async for chunk in stream_chat_response(
+            [{"role": "system", "content": person_context}] + history,
+            connector_results,
+        ):
+            full_response.append(chunk)
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+        assistant_content = "".join(full_response)
+        sources = [r.get("connector") for r in connector_results if "error" not in r]
+        assistant_msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content=assistant_content,
+            metadata_={"sources": sources},
+        )
+        db.add(assistant_msg)
+        await db.commit()
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+
+
+@router.post("/{org_id}/members/{member_id}/chat/stream")
+async def member_chat_stream(
+    org_id: uuid.UUID,
+    member_id: uuid.UUID,
+    body: ChatRequest,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    """SSE chat scoped to a specific member's data (target_user pinned server-side)."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    info = await _get_member_work_info(org_id, member_id, db)
+    if info is None:
+        raise HTTPException(status_code=400, detail="No work email set for this member.")
+    work_email, name = info
+    return await _member_chat_stream(org_id, work_email, name, body, current_user.id, db)
+
+
+@router.post("/{org_id}/employees/{employee_id}/chat/stream")
+async def employee_chat_stream(
+    org_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    body: ChatRequest,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    """SSE chat scoped to a specific employee's data (target_user pinned server-side)."""
+    await get_current_org_membership(str(org_id), current_user, db)
+    info = await _get_employee_work_info(org_id, employee_id, db)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    work_email, name = info
+    return await _member_chat_stream(org_id, work_email, name, body, current_user.id, db)

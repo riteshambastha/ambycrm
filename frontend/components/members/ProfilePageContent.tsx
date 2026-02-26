@@ -1,0 +1,221 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
+import { useBackendOrg } from "@/lib/hooks/useBackendOrg";
+import { apiClient } from "@/lib/api-client";
+import { ProfileHeader } from "./ProfileHeader";
+import { LimitControl } from "./LimitControl";
+import { EmailsSection } from "./EmailsSection";
+import { FilesSection } from "./FilesSection";
+import { SalesforceSection } from "./SalesforceSection";
+import { MeetingsSection } from "./MeetingsSection";
+import { MemberChat } from "./MemberChat";
+import { type SectionData } from "./SectionWrapper";
+import { type PersonOut } from "./MemberCard";
+import { Skeleton } from "@/components/ui/skeleton";
+
+type Section = "emails" | "files" | "salesforce" | "meetings";
+
+interface SectionState {
+  loading: boolean;
+  data: SectionData | null;
+}
+
+const SECTIONS: Section[] = ["emails", "files", "salesforce", "meetings"];
+
+interface ProfilePageContentProps {
+  personId: string;
+  personType: "member" | "employee";
+}
+
+export function ProfilePageContent({ personId, personType }: ProfilePageContentProps) {
+  const { getToken } = useAuth();
+  const { orgId, org, isLoaded } = useBackendOrg();
+
+  const [person, setPerson] = useState<PersonOut | null>(null);
+  const [personLoading, setPersonLoading] = useState(true);
+  const [limit, setLimit] = useState(15);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const [sections, setSections] = useState<Record<Section, SectionState>>({
+    emails: { loading: true, data: null },
+    files: { loading: true, data: null },
+    salesforce: { loading: true, data: null },
+    meetings: { loading: true, data: null },
+  });
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isAdmin = org?.role === "org_admin";
+
+  // Load person info from the people list
+  const loadPerson = useCallback(async () => {
+    const token = await getToken();
+    if (!token || !orgId) return;
+    try {
+      const people = await apiClient.get<PersonOut[]>(`/organizations/${orgId}/people`, token);
+      const found = people.find((p) => p.id === personId && p.person_type === personType);
+      setPerson(found ?? null);
+    } finally {
+      setPersonLoading(false);
+    }
+  }, [getToken, orgId, personId, personType]);
+
+  // Load one section independently
+  const loadSection = useCallback(
+    async (section: Section, currentLimit: number) => {
+      const token = await getToken();
+      if (!token || !orgId) return;
+
+      setSections((prev) => ({
+        ...prev,
+        [section]: { ...prev[section], loading: true },
+      }));
+
+      const path =
+        personType === "member"
+          ? `/organizations/${orgId}/members/${personId}/sections/${section}?limit=${currentLimit}`
+          : `/organizations/${orgId}/employees/${personId}/sections/${section}?limit=${currentLimit}`;
+
+      try {
+        const data = await apiClient.get<SectionData>(path, token);
+        setSections((prev) => ({
+          ...prev,
+          [section]: { loading: false, data },
+        }));
+      } catch {
+        setSections((prev) => ({
+          ...prev,
+          [section]: {
+            loading: false,
+            data: {
+              connected: false,
+              results: [],
+              limit: currentLimit,
+              error: "Failed to load data. Click retry.",
+            },
+          },
+        }));
+      }
+    },
+    [getToken, orgId, personId, personType]
+  );
+
+  // Load all sections in parallel
+  const loadAllSections = useCallback(
+    (currentLimit: number) => {
+      SECTIONS.forEach((s) => loadSection(s, currentLimit));
+    },
+    [loadSection]
+  );
+
+  // Manual full refresh (invalidates cache server-side)
+  const handleRefresh = useCallback(async () => {
+    const token = await getToken();
+    if (!token || !orgId || isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      const path =
+        personType === "member"
+          ? `/organizations/${orgId}/members/${personId}/refresh`
+          : `/organizations/${orgId}/employees/${personId}/refresh`;
+      await apiClient.post(path, {}, token);
+      // Re-fetch sections after a brief delay (Celery tasks are dispatched async)
+      setTimeout(() => {
+        loadAllSections(limit);
+        setIsRefreshing(false);
+      }, 1500);
+    } catch {
+      setIsRefreshing(false);
+    }
+  }, [getToken, orgId, personId, personType, limit, loadAllSections, isRefreshing]);
+
+  // When limit changes, debounce re-fetch
+  const handleLimitChange = useCallback(
+    (newLimit: number) => {
+      setLimit(newLimit);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        loadAllSections(newLimit);
+      }, 300);
+    },
+    [loadAllSections]
+  );
+
+  useEffect(() => {
+    if (isLoaded && orgId) {
+      loadPerson();
+      loadAllSections(limit);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded, orgId]);
+
+  if (personLoading) {
+    return (
+      <div className="p-6 space-y-4 max-w-7xl mx-auto">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-20 rounded-xl" />
+      </div>
+    );
+  }
+
+  if (!person && !personLoading) {
+    return (
+      <div className="p-6 text-center text-muted-foreground">
+        Person not found or you don't have access.
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-5">
+      {person && <ProfileHeader person={person} isAdmin={isAdmin} />}
+
+      <LimitControl
+        value={limit}
+        onChange={handleLimitChange}
+        onRefresh={handleRefresh}
+        isRefreshing={isRefreshing}
+      />
+
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-5 items-start">
+        {/* Left: Data sections */}
+        <div className="space-y-5 min-w-0">
+          <EmailsSection
+            loading={sections.emails.loading}
+            data={sections.emails.data}
+            onRetry={() => loadSection("emails", limit)}
+          />
+          <FilesSection
+            loading={sections.files.loading}
+            data={sections.files.data}
+            onRetry={() => loadSection("files", limit)}
+          />
+          <SalesforceSection
+            loading={sections.salesforce.loading}
+            data={sections.salesforce.data}
+            onRetry={() => loadSection("salesforce", limit)}
+          />
+          <MeetingsSection
+            loading={sections.meetings.loading}
+            data={sections.meetings.data}
+            onRetry={() => loadSection("meetings", limit)}
+          />
+        </div>
+
+        {/* Right: Sticky chat panel */}
+        <div className="lg:sticky lg:top-4 h-[calc(100vh-8rem)]">
+          {person && orgId && (
+            <MemberChat
+              orgId={orgId}
+              personId={personId}
+              personType={personType}
+              displayName={person.display_name}
+              workEmail={person.work_email}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

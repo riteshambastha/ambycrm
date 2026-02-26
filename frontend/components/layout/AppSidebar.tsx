@@ -9,6 +9,7 @@ import {
   Plug,
   Settings,
   Users,
+  Users2,
   Building2,
   ChevronRight,
   Plus,
@@ -35,6 +36,11 @@ const navItems = [
     title: "Chat",
     href: "/chat",
     icon: MessageSquare,
+  },
+  {
+    title: "Members",
+    href: "/members",
+    icon: Users2,
   },
   {
     title: "Connections",

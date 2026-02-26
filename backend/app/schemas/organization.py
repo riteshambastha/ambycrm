@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, EmailStr, field_validator
 
@@ -92,3 +93,31 @@ class InvitationOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SectionResponse(BaseModel):
+    """Response for a single member profile section (emails/files/salesforce/meetings)."""
+    connected: bool
+    results: list[dict[str, Any]]
+    summary: str | None = None
+    error: str | None = None
+    limit: int
+    # Cache metadata
+    cached: bool = False
+    fetched_at: datetime | None = None
+    cache_status: str = "fresh"  # "fresh" | "stale_refresh" | "miss"
+
+
+class PersonOut(BaseModel):
+    """Unified person record for the Members list (member or employee)."""
+    id: uuid.UUID
+    person_type: str          # "member" | "employee"
+    first_name: str | None
+    last_name: str | None
+    display_name: str
+    email: str | None         # Clerk/login email
+    work_email: str | None    # Microsoft 365 / connector email
+    avatar_url: str | None
+    role: str | None          # None for employees
+    is_active: bool
+    joined_at: datetime | None

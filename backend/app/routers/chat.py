@@ -8,16 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import CurrentUser, get_current_org_membership
 from app.database import get_db
 from app.models.conversation import Conversation, Message
-from app.models.integration import Integration, IntegrationCredential
 from app.models.organization import OrgEmployee
 from app.schemas.chat import ChatRequest, ConversationOut, MessageOut
 from app.services.ai_service import detect_connectors, fetch_all_connector_data, stream_chat_response
-from app.services.encryption import decrypt
+from app.services.integration_service import load_connected_integrations
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -96,29 +94,7 @@ async def _load_connected_integrations(
     org_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession
 ) -> list[dict]:
     """Load all connected integrations with decrypted credentials."""
-    result = await db.execute(
-        select(Integration)
-        .options(selectinload(Integration.credentials))
-        .where(Integration.org_id == org_id, Integration.status == "connected")
-    )
-    integrations = result.scalars().all()
-    out = []
-    for integration in integrations:
-        if not integration.credentials:
-            continue
-        cred = integration.credentials[0]
-        try:
-            out.append({
-                "connector_key": integration.connector_key,
-                "credentials": {
-                    "access_token": decrypt(cred.access_token),
-                    "refresh_token": decrypt(cred.refresh_token) if cred.refresh_token else None,
-                    **cred.raw_data,
-                },
-            })
-        except Exception:
-            continue
-    return out
+    return await load_connected_integrations(org_id, db)
 
 
 @router.post("/{org_id}/stream")

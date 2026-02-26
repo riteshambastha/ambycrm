@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # Member profile cache TTLs (in seconds)
+    CACHE_TTL_EMAILS: int = 4 * 3600       # 4 hours
+    CACHE_TTL_FILES: int = 12 * 3600       # 12 hours
+    CACHE_TTL_SALESFORCE: int = 6 * 3600   # 6 hours
+    CACHE_TTL_MEETINGS: int = 24 * 3600    # 24 hours
+    CACHE_MAX_ITEMS: int = 50              # always cache this many items
+
     # Clerk
     CLERK_SECRET_KEY: str = ""
     CLERK_PUBLISHABLE_KEY: str = ""
