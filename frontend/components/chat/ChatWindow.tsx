@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Send, Square, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,7 @@ export function ChatWindow({
 }: ChatWindowProps) {
   const { getToken } = useAuth();
   const { orgId, isLoaded: orgLoaded } = useBackendOrg();
+  const router = useRouter();
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -164,6 +166,17 @@ export function ChatWindow({
                 )
               );
               break;
+            }
+            // First event: server sends the conversation ID so we can update the URL
+            if (chunk.startsWith("[CONV_ID:")) {
+              const newConvId = chunk.slice(9, -1);
+              setConversationId(newConvId);
+              onConversationCreated?.(newConvId);
+              // Navigate to the conversation URL without losing the streaming state
+              if (!initialConvId) {
+                router.replace(`/chat/${newConvId}`);
+              }
+              continue;
             }
             setMessages((prev) =>
               prev.map((m) =>

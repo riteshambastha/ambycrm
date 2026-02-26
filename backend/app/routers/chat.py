@@ -192,6 +192,9 @@ async def stream_chat(
 
     # Accumulate and save the assistant response after streaming
     async def _event_stream() -> AsyncIterator[bytes]:
+        # Always send the conversation ID first so the client can update its URL
+        yield f"data: [CONV_ID:{conv.id}]\n\n".encode()
+
         full_response = []
         async for chunk in stream_chat_response(history, connector_results):
             full_response.append(chunk)
