@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="AmbyChat API",
+    title="humAInly API",
     version="0.1.0",
     description="Multi-tenant SaaS platform — Integration Hub & AI Chat",
     lifespan=lifespan,

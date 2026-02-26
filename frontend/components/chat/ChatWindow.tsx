@@ -304,7 +304,7 @@ export function ChatWindow({
           </div>
         </div>
         <p className="text-center text-xs text-muted-foreground mt-2">
-          AmbyChat can make mistakes. Verify important information.
+          humAInly can make mistakes. Verify important information.
         </p>
       </div>
     </div>

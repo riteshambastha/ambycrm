@@ -66,7 +66,7 @@ export default function MembersPage() {
               Team Members
             </h1>
             <p className="text-muted-foreground text-sm mt-1">
-              People with AmbyChat accounts in your organization.
+              People with humAInly accounts in your organization.
             </p>
           </div>
           {isAdmin && orgId && (
@@ -108,7 +108,7 @@ export default function MembersPage() {
               Microsoft 365 Employees
             </h2>
             <p className="text-muted-foreground text-sm mt-1">
-              Register employees so the AI can query their email. No AmbyChat
+              Register employees so the AI can query their email. No humAInly
               account needed — just their name and work email.
             </p>
           </div>

@@ -70,7 +70,7 @@ export function AddEmployeeModal({ orgId, onAdded }: AddEmployeeModalProps) {
           <DialogTitle>Add Employee</DialogTitle>
           <DialogDescription>
             Register an employee's Microsoft 365 email so the AI can query their
-            inbox. No AmbyChat account is required for the employee.
+            inbox. No humAInly account is required for the employee.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2">

@@ -68,7 +68,7 @@ export function AppSidebar() {
             <MessageSquare className="size-4 text-primary-foreground" />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold truncate">AmbyChat</p>
+            <p className="text-sm font-semibold truncate">humAInly</p>
             {org && (
               <p className="text-xs text-muted-foreground truncate">{org.org_name}</p>
             )}

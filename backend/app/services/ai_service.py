@@ -44,7 +44,7 @@ _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
     "meeting": ["meeting", "meetings", "summary", "summarize my meeting", "transcript", "recording", "call recording", "call summary"],
 }
 
-_SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, OneDrive files, documents, and Teams meeting transcripts.
+_SYSTEM_PROMPT = """You are humAInly, an AI assistant that has access to enterprise tools like CRMs, email, OneDrive files, documents, and Teams meeting transcripts.
 
 When answering, you have been provided with relevant data fetched from connected integrations.
 Always:
