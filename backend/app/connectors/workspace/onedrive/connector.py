@@ -324,9 +324,12 @@ class OneDriveConnector(BaseConnector):
                 name: str = item.get("name", "")
                 ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
 
+                mime_type = item.get("file", {}).get("mimeType") or ""
+                is_video = not is_folder and (mime_type.startswith("video/") or ext in {".mp4", ".mov", ".avi", ".mkv", ".webm"})
+
                 entry: dict[str, Any] = {
                     "name": name,
-                    "type": "folder" if is_folder else (item.get("file", {}).get("mimeType") or "file"),
+                    "type": "folder" if is_folder else (mime_type or "file"),
                     "size_bytes": item.get("size"),
                     "created": item.get("createdDateTime"),
                     "modified": item.get("lastModifiedDateTime"),
@@ -334,6 +337,12 @@ class OneDriveConnector(BaseConnector):
                     "path": item.get("parentReference", {}).get("path", "").replace("/drive/root:", "") or "/",
                     "created_by": ((item.get("createdBy") or {}).get("user") or {}).get("displayName"),
                 }
+
+                # For video files, include metadata the AI can use to emit a playable marker
+                if is_video and item_id:
+                    entry["is_video"] = True
+                    entry["item_id"] = item_id
+                    entry["owner_email"] = target_user
 
                 item_id: str | None = item.get("id")
                 file_size = item.get("size") or 0

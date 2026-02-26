@@ -4,7 +4,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -226,3 +228,50 @@ async def disconnect_integration(
         raise HTTPException(status_code=404, detail="Integration not found")
     integration.status = "disconnected"
     await db.flush()
+
+
+# ── OneDrive video URL helper ─────────────────────────────────────────────────
+
+@router.get("/onedrive/video-url")
+async def get_onedrive_video_url(
+    user_email: str,
+    item_id: str,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> JSONResponse:
+    """
+    Return a short-lived pre-authenticated download URL for an OneDrive video file.
+    The client can use this URL directly as a <video src="..."> source.
+    Requires the org to have an active OneDrive integration.
+    """
+    # Verify caller belongs to an org with an active OneDrive integration
+    from app.connectors.workspace.onedrive.connector import OneDriveConnector
+
+    connector = OneDriveConnector()
+    try:
+        token_data = await connector.get_org_token()
+        token = token_data["access_token"]
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to get org token: {exc}") from exc
+
+    _GRAPH_URL = "https://graph.microsoft.com/v1.0"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{_GRAPH_URL}/users/{user_email}/drive/items/{item_id}",
+            params={"$select": "id,name,@microsoft.graph.downloadUrl"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="File not found")
+    if resp.status_code == 403:
+        raise HTTPException(status_code=403, detail="Access denied to this file")
+    if not resp.is_success:
+        raise HTTPException(status_code=502, detail=f"Graph API error {resp.status_code}")
+
+    data = resp.json()
+    download_url = data.get("@microsoft.graph.downloadUrl")
+    if not download_url:
+        raise HTTPException(status_code=404, detail="Download URL not available for this file")
+
+    return JSONResponse({"url": download_url, "name": data.get("name", "")})
