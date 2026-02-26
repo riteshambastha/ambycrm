@@ -15,8 +15,13 @@ from app.connectors.registry import registry
 
 # Which connector keys map to which intent keywords
 _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
-    "salesforce": ["salesforce", "deal", "opportunity", "crm", "pipeline", "account"],
-    "hubspot": ["hubspot", "contact", "company"],
+    "salesforce": [
+        "salesforce", "deal", "deals", "opportunity", "opportunities", "crm",
+        "pipeline", "stage", "close date", "revenue", "account", "accounts",
+        "contact", "contacts", "lead", "leads", "prospect", "prospects",
+        "case", "cases", "task", "tasks", "activity",
+    ],
+    "hubspot": ["hubspot"],
     "dynamics": ["dynamics", "microsoft crm"],
     "sugarcrm": ["sugarcrm", "sugar"],
     "google_workspace": ["gmail", "google drive", "google docs"],
@@ -54,6 +59,7 @@ Always:
   Do NOT summarize or skip videos — output one [VIDEO:...] line per video found in the data.
 - For Teams meetings, include the meeting subject, date, and key points from the transcript if available.
 - If a meeting has no transcript (has_transcript: false), note it was not recorded or transcription was not enabled.
+- For Salesforce data, structure the output clearly by object type (Opportunities, Contacts, Accounts, Leads). Include key fields like stage, amount, close date for opportunities; email/phone for contacts.
 - If data is missing or unavailable, say so clearly.
 """
 
