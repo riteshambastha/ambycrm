@@ -1,5 +1,6 @@
 """Chat router — conversations, messages, and streaming AI responses."""
 
+import json
 import uuid
 from typing import Annotated, AsyncIterator
 
@@ -198,7 +199,9 @@ async def stream_chat(
         full_response = []
         async for chunk in stream_chat_response(history, connector_results):
             full_response.append(chunk)
-            yield f"data: {chunk}\n\n".encode()
+            # JSON-encode so newlines (\n) and other special chars survive the SSE wire.
+            # The frontend JSON.parses each chunk to restore them.
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
 
         # Persist assistant message
         assistant_content = "".join(full_response)

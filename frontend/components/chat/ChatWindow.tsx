@@ -157,8 +157,10 @@ export function ChatWindow({
 
         for (const line of lines) {
           if (line.startsWith("data: ")) {
-            const chunk = line.slice(6);
-            if (chunk === "[DONE]") {
+            const raw = line.slice(6);
+
+            // Control frames (not JSON-encoded)
+            if (raw === "[DONE]") {
               setIsStreaming(false);
               setMessages((prev) =>
                 prev.map((m) =>
@@ -167,17 +169,24 @@ export function ChatWindow({
               );
               break;
             }
-            // First event: server sends the conversation ID so we can update the URL
-            if (chunk.startsWith("[CONV_ID:")) {
-              const newConvId = chunk.slice(9, -1);
+            if (raw.startsWith("[CONV_ID:")) {
+              const newConvId = raw.slice(9, -1);
               setConversationId(newConvId);
               onConversationCreated?.(newConvId);
-              // Navigate to the conversation URL without losing the streaming state
               if (!initialConvId) {
                 router.replace(`/chat/${newConvId}`);
               }
               continue;
             }
+
+            // Text chunks are JSON-encoded so newlines survive the SSE wire
+            let chunk: string;
+            try {
+              chunk = JSON.parse(raw);
+            } catch {
+              chunk = raw; // fallback for any non-JSON frame
+            }
+
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id
