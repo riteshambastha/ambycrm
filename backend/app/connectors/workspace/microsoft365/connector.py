@@ -149,11 +149,16 @@ class Microsoft365Connector(BaseConnector):
         _skip_words = {
             "show", "get", "find", "fetch", "display", "list", "inbox", "emails",
             "email", "for", "of", "me", "the", "my", "from", "recent", "latest",
-            "messages", "mail", "about",
+            "messages", "mail", "about", "outlook", "microsoft",
+            # common English stop words that are not email subject keywords
+            "can", "you", "see", "please", "could", "would", "should", "will",
+            "some", "any", "data", "info", "information", "details", "check",
+            "that", "this", "there", "their", "they", "has", "have", "are",
+            "not", "but", "and", "its", "our", "your", "with", "into", "read",
         }
         keyword_parts = [
             w for w in query.lower().split()
-            if w not in _skip_words and "@" not in w and len(w) > 2
+            if w not in _skip_words and "@" not in w and len(w) > 3
         ]
         keyword = " ".join(keyword_parts[:4]).strip()  # up to 4 meaningful words
 

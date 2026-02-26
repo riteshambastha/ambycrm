@@ -223,19 +223,24 @@ class OneDriveConnector(BaseConnector):
         date_start, date_end = _parse_date_range(query)
         has_date_filter = date_start is not None or date_end is not None
 
-        # Extract a meaningful content keyword (strip navigation + date words)
+        # Extract a meaningful content keyword (strip navigation + date words + common English)
         _skip = {
             "show", "get", "find", "fetch", "display", "list", "files", "file",
-            "folder", "folders", "onedrive", "drive", "documents", "document",
+            "folder", "folders", "onedrive", "one", "drive", "documents", "document",
             "for", "of", "me", "the", "my", "from", "recent", "latest", "all",
             "search", "in", "on", "about", "what", "open", "read",
+            # common English stop words that aren't content keywords
+            "can", "you", "please", "could", "would", "should", "will", "shall",
+            "some", "any", "few", "more", "most", "other", "into", "with", "that",
+            "this", "there", "their", "they", "has", "have", "had", "are", "was",
+            "not", "but", "and", "its", "his", "her", "our", "your",
             # date stop-words
             "year", "years", "month", "months", "ago", "old", "older", "than",
             "before", "after", "since", "between", "last", "prior",
         }
         keyword_parts = [
             w for w in query.lower().split()
-            if w not in _skip and "@" not in w and len(w) > 2 and not w.isdigit()
+            if w not in _skip and "@" not in w and len(w) > 3 and not w.isdigit()
         ]
         keyword = " ".join(keyword_parts[:5]).strip()
 
@@ -244,14 +249,29 @@ class OneDriveConnector(BaseConnector):
 
         _select = "id,name,size,lastModifiedDateTime,createdDateTime,createdBy,webUrl,file,folder,parentReference"
 
+        async def _fetch_children(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.get(
+                f"{_GRAPH_URL}/users/{target_user}/drive/root/children",
+                params={"$top": top, "$select": _select, "$orderby": "lastModifiedDateTime desc"},
+                headers=headers,
+            )
+
+        async def _fetch_search(client: httpx.AsyncClient, q: str) -> httpx.Response:
+            safe_q = q.replace("'", "''")
+            r = await client.get(
+                f"{_GRAPH_URL}/users/{target_user}/drive/root/search(q='{safe_q}')",
+                params={"$top": top, "$select": _select},
+                headers=headers,
+            )
+            # Search endpoint may be restricted (403) even with Files.Read.All;
+            # fall back to listing root children so the user still gets results.
+            if r.status_code == 403:
+                return await _fetch_children(client)
+            return r
+
         async with httpx.AsyncClient(timeout=30) as client:
             if keyword:
-                safe_kw = keyword.replace("'", "''")
-                resp = await client.get(
-                    f"{_GRAPH_URL}/users/{target_user}/drive/root/search(q='{safe_kw}')",
-                    params={"$top": top, "$select": _select},
-                    headers=headers,
-                )
+                resp = await _fetch_search(client, keyword)
             elif has_date_filter:
                 # No content keyword but we have a date filter — search all files broadly
                 # using the year as a broad search term so we cover subfolders too
@@ -260,26 +280,13 @@ class OneDriveConnector(BaseConnector):
                     year_hint = str(date_end.year)
                 elif date_start:
                     year_hint = str(date_start.year)
-                # Empty-string search is not allowed; fall back to listing root with higher top
                 if year_hint:
-                    resp = await client.get(
-                        f"{_GRAPH_URL}/users/{target_user}/drive/root/search(q='{year_hint}')",
-                        params={"$top": top, "$select": _select},
-                        headers=headers,
-                    )
+                    resp = await _fetch_search(client, year_hint)
                 else:
-                    resp = await client.get(
-                        f"{_GRAPH_URL}/users/{target_user}/drive/root/children",
-                        params={"$top": top, "$select": _select, "$orderby": "lastModifiedDateTime desc"},
-                        headers=headers,
-                    )
+                    resp = await _fetch_children(client)
             else:
                 # No keyword, no date — list root folder, most recent first
-                resp = await client.get(
-                    f"{_GRAPH_URL}/users/{target_user}/drive/root/children",
-                    params={"$top": top, "$select": _select, "$orderby": "lastModifiedDateTime desc"},
-                    headers=headers,
-                )
+                resp = await _fetch_children(client)
 
             if resp.status_code == 401:
                 return {"results": [], "source": "onedrive", "error": "Auth failed — org token invalid."}

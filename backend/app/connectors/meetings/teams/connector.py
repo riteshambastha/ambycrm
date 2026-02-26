@@ -237,11 +237,16 @@ class TeamsConnector(BaseConnector):
             "show", "get", "find", "fetch", "list", "teams", "meeting", "meetings",
             "transcript", "transcripts", "recording", "recordings", "for", "of",
             "the", "my", "from", "recent", "latest", "all", "about", "summary",
-            "summarize", "call", "calls",
+            "summarize", "call", "calls", "microsoft",
+            # common English stop words that are not meeting subject keywords
+            "can", "you", "see", "please", "could", "would", "should", "will",
+            "some", "any", "data", "info", "information", "details", "check",
+            "that", "this", "there", "their", "they", "has", "have", "are",
+            "not", "but", "and", "its", "our", "your", "with", "into",
         }
         keyword_parts = [
             w for w in query.lower().split()
-            if w not in _skip and "@" not in w and len(w) > 2 and not w.isdigit()
+            if w not in _skip and "@" not in w and len(w) > 3 and not w.isdigit()
         ]
         keyword = " ".join(keyword_parts[:4]).strip()
 
