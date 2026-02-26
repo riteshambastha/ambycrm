@@ -549,7 +549,7 @@ async def _fetch_section_live(
         except Exception:
             pass
 
-    # Store to cache (fire-and-forget style — we're already async so just await)
+    # Store to cache (fire-and-forget — don't break the response if table is missing)
     try:
         await store_section_cache(
             db=db,
@@ -561,7 +561,7 @@ async def _fetch_section_live(
             summary=summary,
         )
     except Exception:
-        pass
+        await db.rollback()
 
     from datetime import datetime, timezone
     return SectionResponse(
@@ -624,7 +624,9 @@ async def _handle_section_request(
     try:
         cached_response, is_stale = await get_section_cache(db, org_id, work_email, section, limit)
     except Exception:
-        pass  # Table missing or other DB error — degrade gracefully to live fetch
+        # A failed query (e.g. missing table) poisons the PostgreSQL transaction.
+        # Rollback so subsequent queries on this session still work.
+        await db.rollback()
 
     if cached_response is not None:
         if is_stale:
