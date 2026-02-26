@@ -2,7 +2,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"),   # look in project root first, then cwd
+        env_file_encoding="utf-8",
+        env_ignore_empty=True,          # empty OS env vars fall back to .env values
+        extra="ignore",
+    )
 
     # App
     APP_ENV: str = "development"
@@ -34,6 +39,10 @@ class Settings(BaseSettings):
 
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
+
+    # Recall.ai
+    RECALL_API_KEY: str = ""
+    RECALL_BASE_URL: str = "https://us-west-2.recall.ai"
 
 
 settings = Settings()

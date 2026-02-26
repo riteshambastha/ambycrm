@@ -15,18 +15,22 @@ fetch_data returns:
   - Full transcript words for each completed bot (up to MAX_TRANSCRIPT chars)
 """
 
-import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
+from app.config import settings
 from app.connectors.base import BaseConnector, ConnectorMetadata
 
-_API_KEY = os.getenv("RECALL_API_KEY", "")
-_BASE_URL = os.getenv("RECALL_BASE_URL", "https://us-west-2.recall.ai").rstrip("/")
-_API_URL = f"{_BASE_URL}/api/v1"
+
+def _api_key() -> str:
+    return settings.RECALL_API_KEY
+
+
+def _api_url() -> str:
+    return f"{settings.RECALL_BASE_URL.rstrip('/')}/api/v1"
 _MAX_TRANSCRIPT_CHARS = 3000
 
 
@@ -99,7 +103,7 @@ class RecallConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Token {_API_KEY}"}
+        return {"Authorization": f"Token {_api_key()}"}
 
     async def get_oauth_url(self, state: str, redirect_uri: str) -> str:
         raise NotImplementedError("Recall.ai uses API key auth, not OAuth")
@@ -111,12 +115,12 @@ class RecallConnector(BaseConnector):
         return credentials
 
     async def test_connection(self, credentials: dict[str, Any]) -> bool:
-        if not _API_KEY:
+        if not _api_key():
             return False
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"{_API_URL}/bot/",
+                    f"{_api_url()}/bot/",
                     params={"limit": 1},
                     headers=self._headers(),
                 )
@@ -129,7 +133,7 @@ class RecallConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     async def fetch_data(self, credentials: dict[str, Any], query: str) -> dict[str, Any]:
-        if not _API_KEY:
+        if not _api_key():
             return {"results": [], "source": "recall", "error": "RECALL_API_KEY not set in .env"}
 
         lower = query.lower()
@@ -163,7 +167,7 @@ class RecallConnector(BaseConnector):
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
-                f"{_API_URL}/bot/",
+                f"{_api_url()}/bot/",
                 params=params,
                 headers=self._headers(),
             )
@@ -203,7 +207,7 @@ class RecallConnector(BaseConnector):
                 # Fetch transcript for completed recordings
                 if current_status == "done" and bot_id:
                     tr = await client.get(
-                        f"{_API_URL}/bot/{bot_id}/transcript/",
+                        f"{_api_url()}/bot/{bot_id}/transcript/",
                         headers=self._headers(),
                         timeout=20,
                     )
