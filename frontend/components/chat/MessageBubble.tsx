@@ -5,6 +5,8 @@ import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { SourceCitation } from "./SourceCitation";
 import { VideoPlayer } from "./VideoPlayer";
+import { VideoGallery } from "./VideoGallery";
+import type { VideoItem } from "./VideoGallery";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bot, User } from "lucide-react";
 
@@ -20,35 +22,54 @@ interface MessageBubbleProps {
   message: ChatMessage;
 }
 
-interface VideoMarker {
-  ownerEmail: string;
-  itemId: string;
-  filename: string;
-}
+type Segment =
+  | { type: "text"; value: string }
+  | { type: "video"; marker: VideoItem }
+  | { type: "gallery"; videos: VideoItem[] };
 
-/** Split content into text segments and [VIDEO:...] markers. */
-function parseVideoMarkers(content: string): Array<{ type: "text"; value: string } | { type: "video"; marker: VideoMarker }> {
+/** Split content into text / single-video / gallery segments. */
+function parseVideoMarkers(content: string): Segment[] {
   const VIDEO_RE = /\[VIDEO:([^\]|]+)\|([^\]|]+)\|([^\]]+)\]/g;
-  const segments: Array<{ type: "text"; value: string } | { type: "video"; marker: VideoMarker }> = [];
+  const raw: Array<{ type: "text"; value: string } | { type: "video"; marker: VideoItem }> = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   while ((match = VIDEO_RE.exec(content)) !== null) {
     if (match.index > lastIndex) {
-      segments.push({ type: "text", value: content.slice(lastIndex, match.index) });
+      raw.push({ type: "text", value: content.slice(lastIndex, match.index) });
     }
-    segments.push({
+    raw.push({
       type: "video",
       marker: { ownerEmail: match[1].trim(), itemId: match[2].trim(), filename: match[3].trim() },
     });
     lastIndex = match.index + match[0].length;
   }
-
   if (lastIndex < content.length) {
-    segments.push({ type: "text", value: content.slice(lastIndex) });
+    raw.push({ type: "text", value: content.slice(lastIndex) });
   }
 
-  return segments;
+  // Merge consecutive VIDEO markers (≥2) into a gallery
+  const merged: Segment[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i].type === "video") {
+      const group: VideoItem[] = [(raw[i] as { type: "video"; marker: VideoItem }).marker];
+      while (i + 1 < raw.length && raw[i + 1].type === "video") {
+        i++;
+        group.push((raw[i] as { type: "video"; marker: VideoItem }).marker);
+      }
+      if (group.length >= 2) {
+        merged.push({ type: "gallery", videos: group });
+      } else {
+        merged.push({ type: "video", marker: group[0] });
+      }
+    } else {
+      merged.push(raw[i] as { type: "text"; value: string });
+    }
+    i++;
+  }
+
+  return merged;
 }
 
 export function MessageBubble({ message }: MessageBubbleProps) {
@@ -83,7 +104,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           ) : segments ? (
             <>
               {segments.map((seg, i) =>
-                seg.type === "video" ? (
+                seg.type === "gallery" ? (
+                  <VideoGallery key={i} videos={seg.videos} />
+                ) : seg.type === "video" ? (
                   <VideoPlayer
                     key={i}
                     ownerEmail={seg.marker.ownerEmail}

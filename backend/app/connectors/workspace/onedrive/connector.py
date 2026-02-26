@@ -223,12 +223,25 @@ class OneDriveConnector(BaseConnector):
         date_start, date_end = _parse_date_range(query)
         has_date_filter = date_start is not None or date_end is not None
 
+        lower_query = query.lower()
+
+        # Detect video/recording intent
+        _video_words = {"recording", "recordings", "video", "videos", "mp4", "mov"}
+        is_video_query = any(w in lower_query for w in _video_words)
+
+        # Parse explicit count from query ("latest 15", "show 5", etc.)
+        import re as _re
+        _count_match = _re.search(r"\b(\d+)\b", query)
+        requested_count = int(_count_match.group(1)) if _count_match else None
+
         # Extract a meaningful content keyword (strip navigation + date words + common English)
         _skip = {
             "show", "get", "find", "fetch", "display", "list", "files", "file",
             "folder", "folders", "onedrive", "one", "drive", "documents", "document",
             "for", "of", "me", "the", "my", "from", "recent", "latest", "all",
             "search", "in", "on", "about", "what", "open", "read",
+            # video/recording words — handled via is_video_query, not keyword search
+            "recording", "recordings", "video", "videos", "meeting", "meetings",
             # common English stop words that aren't content keywords
             "can", "you", "please", "could", "would", "should", "will", "shall",
             "some", "any", "few", "more", "most", "other", "into", "with", "that",
@@ -239,13 +252,20 @@ class OneDriveConnector(BaseConnector):
             "before", "after", "since", "between", "last", "prior",
         }
         keyword_parts = [
-            w for w in query.lower().split()
+            w for w in lower_query.split()
             if w not in _skip and "@" not in w and len(w) > 3 and not w.isdigit()
         ]
         keyword = " ".join(keyword_parts[:5]).strip()
 
-        # When filtering by date, fetch more results so client-side filter has enough to work with
-        top = 100 if has_date_filter else 20
+        # Determine how many results to fetch
+        if requested_count:
+            top = min(requested_count * 3, 150)  # fetch extra for filtering
+        elif has_date_filter:
+            top = 100
+        elif is_video_query:
+            top = 60  # fetch enough to find multiple videos
+        else:
+            top = 20
 
         _select = "id,name,size,lastModifiedDateTime,createdDateTime,createdBy,webUrl,file,folder,parentReference"
 
@@ -269,12 +289,17 @@ class OneDriveConnector(BaseConnector):
                 return await _fetch_children(client)
             return r
 
+        _video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv"}
+        _video_mimes = {"video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska", "video/webm"}
+
         async with httpx.AsyncClient(timeout=30) as client:
-            if keyword:
+            if is_video_query:
+                # For video/recording queries: search for 'mp4' to find recordings
+                # in subfolders. Falls back to root/children on 403.
+                resp = await _fetch_search(client, "mp4")
+            elif keyword:
                 resp = await _fetch_search(client, keyword)
             elif has_date_filter:
-                # No content keyword but we have a date filter — search all files broadly
-                # using the year as a broad search term so we cover subfolders too
                 year_hint = ""
                 if date_end:
                     year_hint = str(date_end.year)
@@ -285,7 +310,6 @@ class OneDriveConnector(BaseConnector):
                 else:
                     resp = await _fetch_children(client)
             else:
-                # No keyword, no date — list root folder, most recent first
                 resp = await _fetch_children(client)
 
             if resp.status_code == 401:
@@ -317,15 +341,33 @@ class OneDriveConnector(BaseConnector):
                 if has_date_filter
                 else raw_items
             )
+
+            # For video queries, filter to only video files and sort newest first
+            if is_video_query:
+                items = [
+                    i for i in items
+                    if not ("folder" in i) and (
+                        (i.get("file", {}).get("mimeType") or "").startswith("video/")
+                        or ("." + i.get("name", "").rsplit(".", 1)[-1].lower()) in _video_exts
+                    )
+                ]
+                items.sort(key=lambda i: i.get("lastModifiedDateTime", ""), reverse=True)
+
+            # Cap to requested count (applies after filtering)
+            result_limit = requested_count if requested_count else (20 if not is_video_query else 10)
+            items = items[:result_limit]
+
             results: list[dict[str, Any]] = []
 
             for item in items:
                 is_folder = "folder" in item
                 name: str = item.get("name", "")
                 ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+                item_id: str | None = item.get("id")
+                file_size = item.get("size") or 0
 
                 mime_type = item.get("file", {}).get("mimeType") or ""
-                is_video = not is_folder and (mime_type.startswith("video/") or ext in {".mp4", ".mov", ".avi", ".mkv", ".webm"})
+                is_video = not is_folder and (mime_type.startswith("video/") or ext in _video_exts)
 
                 entry: dict[str, Any] = {
                     "name": name,
@@ -338,14 +380,11 @@ class OneDriveConnector(BaseConnector):
                     "created_by": ((item.get("createdBy") or {}).get("user") or {}).get("displayName"),
                 }
 
-                # For video files, include metadata the AI can use to emit a playable marker
+                # For video files, include metadata so the AI can emit a playable marker
                 if is_video and item_id:
                     entry["is_video"] = True
                     entry["item_id"] = item_id
                     entry["owner_email"] = target_user
-
-                item_id: str | None = item.get("id")
-                file_size = item.get("size") or 0
 
                 # Fetch content for readable file types within size limit
                 if not is_folder and item_id and file_size < _MAX_FETCH_SIZE_BYTES:
