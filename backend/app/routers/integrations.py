@@ -141,17 +141,39 @@ async def org_connect(
     connector = registry.get_instance(body.connector_key)
     if not connector:
         raise HTTPException(status_code=404, detail=f"Connector '{body.connector_key}' not found")
-    if connector.metadata.auth_type != "client_credentials":
+
+    allowed_auth_types = {"client_credentials", "api_key"}
+    if connector.metadata.auth_type not in allowed_auth_types:
         raise HTTPException(
             status_code=400,
-            detail="This connector uses OAuth, not client credentials. Use the OAuth flow instead.",
+            detail="This connector uses OAuth. Use the OAuth flow instead.",
         )
 
-    # Fetch an app-level token
-    try:
-        tokens = await connector.get_org_token()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to obtain org token: {exc}") from exc
+    # For client_credentials connectors: fetch an app-level token.
+    # For api_key connectors: verify the key is set in env, then store a placeholder.
+    if connector.metadata.auth_type == "client_credentials":
+        try:
+            tokens = await connector.get_org_token()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to obtain org token: {exc}") from exc
+        access_token_value = tokens["access_token"]
+        token_type_value = tokens.get("token_type", "Bearer")
+        expires_at_value = tokens.get("expires_at")
+        scope_value = "https://graph.microsoft.com/.default"
+        raw_data_value: dict = {"auth_type": "client_credentials"}
+    else:
+        # api_key — verify connectivity
+        ok = await connector.test_connection({})
+        if not ok:
+            raise HTTPException(
+                status_code=502,
+                detail="Could not connect using the configured API key. Check RECALL_API_KEY in .env.",
+            )
+        access_token_value = "api_key"   # sentinel; real key read from env
+        token_type_value = "ApiKey"
+        expires_at_value = None
+        scope_value = "api_key"
+        raw_data_value = {"auth_type": "api_key"}
 
     # Upsert Integration
     existing = await db.execute(
@@ -184,12 +206,12 @@ async def org_connect(
         cred = IntegrationCredential(integration_id=integration.id)
         db.add(cred)
 
-    cred.access_token = encrypt(tokens["access_token"])
-    cred.refresh_token = None  # client credentials don't use refresh tokens
-    cred.token_type = tokens.get("token_type", "Bearer")
-    cred.expires_at = tokens.get("expires_at")
-    cred.scope = "https://graph.microsoft.com/.default"
-    cred.raw_data = {"auth_type": "client_credentials"}
+    cred.access_token = encrypt(access_token_value)
+    cred.refresh_token = None
+    cred.token_type = token_type_value
+    cred.expires_at = expires_at_value
+    cred.scope = scope_value
+    cred.raw_data = raw_data_value
 
     await db.flush()
     return IntegrationOut.model_validate(integration)

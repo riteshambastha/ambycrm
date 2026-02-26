@@ -60,7 +60,8 @@ export function ConnectorCard({ connector, integration, orgId, isAdmin, onStatus
   const [isLoading, setIsLoading] = useState(false);
 
   const isConnected = integration?.status === "connected";
-  const isOrgLevel = connector.auth_type === "client_credentials";
+  const isOrgLevel = connector.auth_type === "client_credentials" || connector.auth_type === "api_key";
+  const isApiKey = connector.auth_type === "api_key";
 
   // ── Org-level connect (client credentials, no OAuth redirect) ──────────────
   const handleOrgConnect = async () => {
@@ -159,7 +160,9 @@ export function ConnectorCard({ connector, integration, orgId, isAdmin, onStatus
         )}
         {isOrgLevel && !isConnected && (
           <p className="text-xs text-amber-600 mt-2">
-            Requires Azure AD admin consent with <code>Mail.Read</code> application permission.
+            {isApiKey
+              ? "Uses API key configured in server environment."
+              : "Requires Azure AD admin consent with application permissions."}
           </p>
         )}
       </CardContent>

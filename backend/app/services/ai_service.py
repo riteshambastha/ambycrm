@@ -36,12 +36,12 @@ _CONNECTOR_INTENT_MAP: dict[str, list[str]] = {
         "spreadsheet", "presentation", "word doc", "excel", "powerpoint",
         "upload", "attachment", "drive",
     ],
-    "fireflies": ["fireflies", "transcript", "recording", "call summary"],
+    "fireflies": ["fireflies"],
     "teams": ["teams", "microsoft teams"],
     "otter": ["otter", "otter.ai"],
-    "recall": ["recall", "recall.ai"],
+    "recall": ["recall", "recall.ai", "notetaker", "bot recording"],
     # Generic terms that could apply to any meeting connector
-    "meeting": ["meeting", "meetings", "summary", "summarize my meeting"],
+    "meeting": ["meeting", "meetings", "summary", "summarize my meeting", "transcript", "recording", "call recording", "call summary"],
 }
 
 _SYSTEM_PROMPT = """You are AmbyChat, an AI assistant that has access to enterprise tools like CRMs, email, OneDrive files, documents, and Teams meeting transcripts.
@@ -60,6 +60,7 @@ Always:
 - For Teams meetings, include the meeting subject, date, and key points from the transcript if available.
 - If a meeting has no transcript (has_transcript: false), note it was not recorded or transcription was not enabled.
 - For Salesforce data, structure the output clearly by object type (Opportunities, Contacts, Accounts, Leads). Include key fields like stage, amount, close date for opportunities; email/phone for contacts.
+- For Recall.ai data, list each recording with its name, status, and start time. If a transcript is available, summarize it clearly. If no recordings exist, explain that bots need to be dispatched to meetings first.
 - If data is missing or unavailable, say so clearly.
 """
 
