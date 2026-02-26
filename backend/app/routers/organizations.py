@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,11 +108,21 @@ async def update_organization(
 
 # ── Members ───────────────────────────────────────────────────────────────────
 
+def _dispatch_precache(org_id_str: str) -> None:
+    """Fire-and-forget Celery task dispatch. Runs in a BackgroundTask after response is sent."""
+    try:
+        from app.tasks.member_sync import precache_org_members
+        precache_org_members.delay(org_id_str)
+    except Exception:
+        pass
+
+
 @router.get("/{org_id}/members", response_model=list[MemberOut])
 async def list_members(
     org_id: uuid.UUID,
     current_user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> list[MemberOut]:
     await get_current_org_membership(str(org_id), current_user, db)
     result = await db.execute(
@@ -122,12 +132,8 @@ async def list_members(
     )
     members = result.scalars().all()
 
-    # Kick off background pre-caching for all members (fire-and-forget)
-    try:
-        from app.tasks.member_sync import precache_org_members
-        precache_org_members.delay(str(org_id))
-    except Exception:
-        pass  # Never fail the request if Celery is unavailable
+    # Dispatch pre-caching AFTER the response is sent — never blocks the request
+    background_tasks.add_task(_dispatch_precache, str(org_id))
 
     return [
         MemberOut(
@@ -151,6 +157,7 @@ async def list_people(
     org_id: uuid.UUID,
     current_user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> list[PersonOut]:
     """Unified people directory combining OrganizationMembers and OrgEmployees."""
     await get_current_org_membership(str(org_id), current_user, db)
@@ -196,12 +203,8 @@ async def list_people(
             joined_at=e.created_at,
         ))
 
-    # Trigger background pre-caching
-    try:
-        from app.tasks.member_sync import precache_org_members
-        precache_org_members.delay(str(org_id))
-    except Exception:
-        pass
+    # Dispatch pre-caching AFTER the response is sent — never blocks the request
+    background_tasks.add_task(_dispatch_precache, str(org_id))
 
     return people
 
@@ -686,12 +689,22 @@ for _section in ("emails", "files", "salesforce", "meetings"):
 
 # ── Manual Cache Refresh ──────────────────────────────────────────────────────
 
+def _dispatch_sync_all(org_id_str: str, work_email: str, name: str) -> None:
+    """Fire-and-forget: dispatch Celery sync task. Runs after response is sent."""
+    try:
+        from app.tasks.member_sync import sync_member_all_sections
+        sync_member_all_sections.delay(org_id_str, work_email, name)
+    except Exception:
+        pass
+
+
 @router.post("/{org_id}/members/{member_id}/refresh", status_code=202)
 async def refresh_member_cache(
     org_id: uuid.UUID,
     member_id: uuid.UUID,
     current_user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """Invalidate and re-fetch all cached sections for a member."""
     await get_current_org_membership(str(org_id), current_user, db)
@@ -700,11 +713,7 @@ async def refresh_member_cache(
         raise HTTPException(status_code=400, detail="No work email set for this member.")
     work_email, name = info
     await invalidate_member_cache(db, org_id, work_email)
-    try:
-        from app.tasks.member_sync import sync_member_all_sections
-        sync_member_all_sections.delay(str(org_id), work_email, name)
-    except Exception:
-        pass
+    background_tasks.add_task(_dispatch_sync_all, str(org_id), work_email, name)
     return {"status": "refreshing"}
 
 
@@ -714,6 +723,7 @@ async def refresh_employee_cache(
     employee_id: uuid.UUID,
     current_user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """Invalidate and re-fetch all cached sections for an employee."""
     await get_current_org_membership(str(org_id), current_user, db)
@@ -722,11 +732,7 @@ async def refresh_employee_cache(
         raise HTTPException(status_code=404, detail="Employee not found")
     work_email, name = info
     await invalidate_member_cache(db, org_id, work_email)
-    try:
-        from app.tasks.member_sync import sync_member_all_sections
-        sync_member_all_sections.delay(str(org_id), work_email, name)
-    except Exception:
-        pass
+    background_tasks.add_task(_dispatch_sync_all, str(org_id), work_email, name)
     return {"status": "refreshing"}
 
 

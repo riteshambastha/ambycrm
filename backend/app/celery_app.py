@@ -25,6 +25,13 @@ celery_app.conf.update(
     enable_utc=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Fail fast if Redis is unavailable — never block an HTTP response
+    broker_transport_options={
+        "socket_timeout": 2,
+        "socket_connect_timeout": 2,
+        "retry_on_timeout": False,
+    },
+    broker_connection_retry_on_startup=False,
     # Beat schedule
     beat_schedule={
         # Clean up expired and inactive cache rows every hour

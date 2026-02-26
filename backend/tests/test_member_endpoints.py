@@ -274,23 +274,23 @@ async def test_refresh_member_invalidates_cache_and_dispatches_task(mock_db):
     r.scalar_one_or_none = MagicMock(return_value=member)
     mock_db.execute = AsyncMock(return_value=r)
 
-    # sync_member_all_sections is locally imported inside refresh_member_cache
-    import app.tasks.member_sync as sync_module
-    mock_task = MagicMock()
-    mock_task.delay = MagicMock()
+    from fastapi import BackgroundTasks
+    fake_background = BackgroundTasks()
 
+    # refresh_member_cache now queues _dispatch_sync_all via BackgroundTasks
     with patch("app.routers.organizations.invalidate_member_cache", new=AsyncMock()) as mock_inv, \
-         patch.object(sync_module, "sync_member_all_sections", mock_task), \
+         patch("app.routers.organizations._dispatch_sync_all") as mock_dispatch, \
          patch("app.routers.organizations.get_current_org_membership", new=AsyncMock()):
 
         mock_user = MagicMock()
         from app.routers.organizations import refresh_member_cache
 
-        result = await refresh_member_cache(ORG_ID, MEMBER_ID, mock_user, mock_db)
+        result = await refresh_member_cache(ORG_ID, MEMBER_ID, mock_user, mock_db, fake_background)
 
     assert result is not None
     mock_inv.assert_called_once_with(mock_db, ORG_ID, WORK_EMAIL)
-    mock_task.delay.assert_called_once()
+    # The background task should have been registered
+    assert len(fake_background.tasks) == 1
 
 
 # ── PersonOut construction from member/employee ───────────────────────────────
