@@ -256,9 +256,10 @@ async def get_onedrive_video_url(
 
     _GRAPH_URL = "https://graph.microsoft.com/v1.0"
     async with httpx.AsyncClient(timeout=15) as client:
+        # Do NOT use $select — @microsoft.graph.downloadUrl is only returned
+        # when no $select is specified (Graph API behaviour).
         resp = await client.get(
             f"{_GRAPH_URL}/users/{user_email}/drive/items/{item_id}",
-            params={"$select": "id,name,@microsoft.graph.downloadUrl"},
             headers={"Authorization": f"Bearer {token}"},
         )
 
