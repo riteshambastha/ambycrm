@@ -75,6 +75,7 @@ export function MemberChat({ orgId, personId, personType, displayName, workEmail
           body: JSON.stringify({
             message: trimmed,
             conversation_id: conversationId,
+            org_id: orgId,
           }),
           signal: controller.signal,
         });
@@ -83,7 +84,12 @@ export function MemberChat({ orgId, personId, personType, displayName, workEmail
           let detail = "Something went wrong. Please try again.";
           try {
             const errBody = await res.json();
-            detail = errBody?.detail ?? detail;
+            const raw = errBody?.detail;
+            if (typeof raw === "string") {
+              detail = raw;
+            } else if (Array.isArray(raw)) {
+              detail = raw.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join("; ");
+            }
           } catch { /* ignore parse error */ }
           setMessages((prev) => {
             const copy = [...prev];
