@@ -117,7 +117,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                   <ReactMarkdown
                     key={i}
                     remarkPlugins={[remarkGfm]}
-                    components={{
+                      components={{
                       p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
                       strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
                       em: ({ children }) => <em className="italic">{children}</em>,
@@ -127,6 +127,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                       h1: ({ children }) => <h1 className="text-base font-bold mb-1">{children}</h1>,
                       h2: ({ children }) => <h2 className="text-sm font-bold mb-1">{children}</h2>,
                       h3: ({ children }) => <h3 className="text-sm font-semibold mb-1">{children}</h3>,
+                      a: ({ href, children }) => (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline underline-offset-2 hover:opacity-80 transition-opacity"
+                        >
+                          {children}
+                        </a>
+                      ),
                       code: ({ children }) => (
                         <code className="bg-background/40 rounded px-1 py-0.5 text-xs font-mono break-all">
                           {children}
