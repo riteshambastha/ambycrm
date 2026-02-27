@@ -3,6 +3,7 @@ from app.models.user import User
 from app.models.integration import Connector, Integration, IntegrationCredential, SyncJob
 from app.models.conversation import Conversation, Message
 from app.models.member_cache import MemberProfileCache
+from app.models.account_contact import AccountContact, LinkedInPost
 
 __all__ = [
     "Organization",
@@ -17,4 +18,6 @@ __all__ = [
     "Conversation",
     "Message",
     "MemberProfileCache",
+    "AccountContact",
+    "LinkedInPost",
 ]

@@ -15,6 +15,7 @@ fetch_data returns:
   - Full transcript words for each completed bot (up to MAX_TRANSCRIPT chars)
 """
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -23,6 +24,8 @@ import httpx
 
 from app.config import settings
 from app.connectors.base import BaseConnector, ConnectorMetadata
+
+logger = logging.getLogger(__name__)
 
 
 def _api_key() -> str:
@@ -136,6 +139,7 @@ class RecallConnector(BaseConnector):
         if not _api_key():
             return {"results": [], "source": "recall", "error": "RECALL_API_KEY not set in .env"}
 
+        target_user: str | None = credentials.get("target_user")
         lower = query.lower()
 
         # Parse explicit count
@@ -158,8 +162,16 @@ class RecallConnector(BaseConnector):
         ]
         keyword = " ".join(keyword_parts[:3]).strip()
 
-        # Build query params
-        params: dict[str, Any] = {"limit": limit}
+        # When a target_user is set, derive the person's name for transcript matching
+        target_name_lower: str = ""
+        if target_user:
+            local_part = target_user.split("@")[0]
+            target_name_lower = local_part.replace(".", " ").replace("_", " ").replace("-", " ").lower()
+
+        # Build query params — fetch more bots when person-filtering so we have a
+        # better chance of finding meetings that mention the target person
+        fetch_limit = max(limit, 25) if target_user else limit
+        params: dict[str, Any] = {"limit": fetch_limit}
         if date_start:
             params["join_at__gte"] = date_start.strftime("%Y-%m-%dT%H:%M:%SZ")
         if date_end:
@@ -178,9 +190,10 @@ class RecallConnector(BaseConnector):
                 return {"results": [], "source": "recall", "error": f"Recall API error {resp.status_code}: {resp.text[:200]}"}
 
             bots = resp.json().get("results", [])
+            logger.info("[Recall] Fetched %d bots (target_user=%s)", len(bots), target_user or "none")
 
-            # Filter by keyword if present
-            if keyword:
+            # When NOT doing a person-specific query, filter by keyword in bot_name/meeting_url
+            if keyword and not target_user:
                 bots = [
                     b for b in bots
                     if keyword in (b.get("bot_name") or "").lower()
@@ -223,10 +236,42 @@ class RecallConnector(BaseConnector):
 
                 results.append(entry)
 
+            # When target_user is set, keep only recordings where the person
+            # is mentioned in the transcript or bot_name (i.e. they participated)
+            if target_user and results:
+                person_results = []
+                for r in results:
+                    transcript_text = (r.get("transcript") or "").lower()
+                    bot_name = (r.get("name") or "").lower()
+                    meeting_url = (r.get("meeting_url") or "").lower()
+                    match = (
+                        target_user.lower() in transcript_text
+                        or target_user.lower() in bot_name
+                        or target_user.lower() in meeting_url
+                    )
+                    if not match and target_name_lower:
+                        name_parts = target_name_lower.split()
+                        match = any(
+                            part in transcript_text or part in bot_name
+                            for part in name_parts if len(part) > 2
+                        )
+                    if match:
+                        person_results.append(r)
+
+                logger.info(
+                    "[Recall] Person filter: %d/%d recordings match '%s'",
+                    len(person_results), len(results), target_user,
+                )
+                # If person filter yields nothing, fall back to ALL recordings
+                # so the LLM at least has some meeting context
+                if person_results:
+                    results = person_results
+
             if not results:
                 return {
                     "results": [],
                     "source": "recall",
+                    "target_user": target_user,
                     "message": (
                         "No Recall.ai recordings found. "
                         "Send a bot to a meeting first: go to https://recall.ai and create a bot, "
@@ -235,8 +280,9 @@ class RecallConnector(BaseConnector):
                 }
 
             return {
-                "results": results,
+                "results": results[:limit],
                 "source": "recall",
+                "target_user": target_user,
                 "searched_for": keyword or "(recent recordings)",
                 "total": len(results),
             }

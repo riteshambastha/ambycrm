@@ -179,6 +179,13 @@ async def fetch_all_connector_data(
     """
     target_user = extract_target_user(query, org_members, history=history)
 
+    # When a person is identified, always include meeting connectors so
+    # transcripts are available even when the user doesn't say "meeting"
+    if target_user and target_keys is not None:
+        for mc in _MEETING_CONNECTORS:
+            if mc not in target_keys:
+                target_keys.append(mc)
+
     tasks = []
     for integration in connected_integrations:
         key = integration["connector_key"]
@@ -186,7 +193,7 @@ async def fetch_all_connector_data(
             continue
         credentials = dict(integration["credentials"])
         # Inject target_user for org-level connectors that query per-employee data
-        if key in ("microsoft365", "onedrive", "teams") and target_user:
+        if key in ("microsoft365", "onedrive", "teams", "recall") and target_user:
             credentials["target_user"] = target_user
         tasks.append(fetch_connector_data(key, credentials, query))
     if not tasks:
@@ -211,7 +218,7 @@ def build_context_block(connector_results: list[dict[str, Any]]) -> str:
         target_user = result.get("target_user")
         source = result.get("source", key)
         if target_user:
-            label = {"onedrive": "Files", "teams": "Meetings"}.get(source, "Emails")
+            label = {"onedrive": "Files", "teams": "Meetings", "recall": "Meetings"}.get(source, "Emails")
             searched = result.get("searched_for", "")
             trivial = {"(latest emails)", "(recent files)", "(recent meetings)"}
             searched_str = f' (searched: "{searched}")' if searched and searched not in trivial else ""

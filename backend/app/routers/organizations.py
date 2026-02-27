@@ -444,7 +444,7 @@ _SECTION_QUERIES: dict[str, str] = {
     "salesforce": (
         "Show all data for {name} ({work_email})"
     ),
-    "meetings": "Show the latest {limit} meeting recordings",
+    "meetings": "Show the latest {limit} meeting recordings for {name} ({work_email})",
 }
 
 _SECTION_SYSTEM_PROMPTS: dict[str, str] = {
@@ -530,7 +530,7 @@ async def _fetch_section_live(
         tasks = []
         for integration in active:
             creds = dict(integration["credentials"])
-            if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
+            if integration["connector_key"] in ("microsoft365", "onedrive", "teams", "recall"):
                 creds["target_user"] = work_email
             tasks.append(fetch_connector_data(integration["connector_key"], creds, query))
 
@@ -888,7 +888,7 @@ async def _member_chat_stream(
 
             if work_email:
                 for integration in connected:
-                    if integration["connector_key"] in ("microsoft365", "onedrive", "teams"):
+                    if integration["connector_key"] in ("microsoft365", "onedrive", "teams", "recall"):
                         integration["credentials"]["target_user"] = work_email
 
             org_members = [

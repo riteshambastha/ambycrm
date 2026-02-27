@@ -51,5 +51,8 @@ class Settings(BaseSettings):
     RECALL_API_KEY: str = ""
     RECALL_BASE_URL: str = "https://us-west-2.recall.ai"
 
+    # Apify (LinkedIn enrichment)
+    APIFY_API_TOKEN: str = ""
+
 
 settings = Settings()

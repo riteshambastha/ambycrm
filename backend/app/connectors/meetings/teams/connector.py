@@ -18,6 +18,7 @@ Strategy:
 Grant admin consent in the Azure portal after adding these.
 """
 
+import logging
 import os
 import re
 import urllib.parse
@@ -28,6 +29,8 @@ from typing import Any
 import httpx
 
 from app.connectors.base import BaseConnector, ConnectorMetadata
+
+logger = logging.getLogger(__name__)
 
 _CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
 _CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
@@ -326,15 +329,14 @@ class TeamsConnector(BaseConnector):
                 entry["attendees"] = [a for a in attendees if a]
 
                 # ── Step 2: Resolve Graph meeting ID from joinUrl ──────────
-                # Meetings must be resolved via the ORGANIZER's account.
-                # The organizer's Azure AD object ID (Oid) is embedded in the
-                # joinUrl context parameter — we extract it to route the lookup
-                # to the correct user endpoint.
                 meeting_id: str = ""
-                organizer_id: str = ""  # Azure AD object ID of the meeting organizer
+                organizer_id: str = ""
+                subject = entry["subject"]
                 if join_url:
                     organizer_id = _extract_organizer_id(join_url)
                     lookup_user = organizer_id or target_user
+                    if not organizer_id:
+                        logger.warning("[Teams] Could not extract organizer ID from joinUrl for '%s'", subject)
                     resolve_resp = await client.get(
                         f"{_GRAPH_URL}/users/{lookup_user}/onlineMeetings",
                         params={"$filter": f"joinWebUrl eq '{join_url}'"},
@@ -345,6 +347,15 @@ class TeamsConnector(BaseConnector):
                         matches = resolve_resp.json().get("value", [])
                         if matches:
                             meeting_id = matches[0].get("id", "")
+                        else:
+                            logger.info("[Teams] No meeting ID resolved for '%s' (lookup user: %s)", subject, lookup_user)
+                    else:
+                        logger.warning(
+                            "[Teams] Meeting resolve failed for '%s': %d %s",
+                            subject, resolve_resp.status_code, resolve_resp.text[:150],
+                        )
+                else:
+                    logger.info("[Teams] No joinUrl for '%s' — skipping transcript lookup", subject)
 
                 # ── Step 3: Fetch transcripts via organizer's account ──────
                 transcript_user = organizer_id or target_user
@@ -373,11 +384,22 @@ class TeamsConnector(BaseConnector):
                                         + ("… [truncated]" if len(plain) > _MAX_TRANSCRIPT_CHARS else "")
                                     )
                                     entry["has_transcript"] = True
+                                    logger.info("[Teams] Transcript fetched for '%s' (%d chars)", subject, len(plain))
+                                else:
+                                    logger.warning(
+                                        "[Teams] Transcript content fetch failed for '%s': %d",
+                                        subject, content_resp.status_code,
+                                    )
                             entry["transcript_count"] = len(transcripts)
                         else:
                             entry["has_transcript"] = False
+                            logger.info("[Teams] No transcripts available for '%s'", subject)
                     else:
                         entry["has_transcript"] = False
+                        logger.warning(
+                            "[Teams] Transcript list failed for '%s': %d %s",
+                            subject, trans_resp.status_code, trans_resp.text[:150],
+                        )
                 else:
                     entry["has_transcript"] = False
 

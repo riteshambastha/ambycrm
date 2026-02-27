@@ -256,6 +256,29 @@ class SalesforceConnector(BaseConnector):
             "searched_for": keyword or f"(recent {sf_object}s)",
         }
 
+    async def fetch_account_contacts(self, limit: int = 500) -> dict[str, Any]:
+        """
+        Fetch all contacts that belong to an Account (i.e. client contacts
+        our org is interacting with).  Returns cleaned records with account
+        info embedded.
+        """
+        try:
+            fresh = await self.get_org_token()
+            token = fresh["access_token"]
+            instance_url = fresh.get("instance_url", _INSTANCE_URL)
+        except Exception as exc:
+            return {"records": [], "error": f"Failed to get Salesforce token: {exc}"}
+
+        soql = (
+            f"SELECT Id, Name, Email, Phone, Title, "
+            f"Account.Id, Account.Name, Account.Industry "
+            f"FROM Contact "
+            f"WHERE AccountId != null "
+            f"ORDER BY CreatedDate DESC "
+            f"LIMIT {limit}"
+        )
+        return await self._run_soql(token, instance_url, soql)
+
     async def fetch_person_overview(
         self,
         credentials: dict[str, Any],

@@ -13,6 +13,7 @@ import {
   Building2,
   ChevronRight,
   Plus,
+  Linkedin,
 } from "lucide-react";
 import {
   Sidebar,
@@ -41,6 +42,11 @@ const navItems = [
     title: "Members",
     href: "/members",
     icon: Users2,
+  },
+  {
+    title: "LinkedIn",
+    href: "/linkedin",
+    icon: Linkedin,
   },
   {
     title: "Connections",
