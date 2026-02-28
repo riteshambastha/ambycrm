@@ -28,6 +28,7 @@ from app.schemas.organization import (
     OrganizationUpdate,
     PersonOut,
     SectionResponse,
+    SetEmployeePasswordRequest,
     WorkEmailUpdate,
 )
 from app.services.ai_service import detect_connectors, fetch_all_connector_data, stream_chat_response
@@ -423,7 +424,7 @@ async def remove_employee(
     current_user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """Remove an employee record."""
+    """Remove an employee record. Invalidates any active login sessions."""
     await require_org_admin(str(org_id), current_user, db)
     result = await db.execute(
         select(OrgEmployee).where(OrgEmployee.id == employee_id, OrgEmployee.org_id == org_id)
@@ -431,8 +432,44 @@ async def remove_employee(
     employee = result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+    # Invalidate sessions before deleting so any in-flight JWT checks fail
+    employee.sessions_invalidated_at = datetime.now(timezone.utc)
+    await db.flush()
     await db.delete(employee)
     await db.flush()
+
+
+@router.patch(
+    "/{org_id}/employees/{employee_id}/set-password",
+    response_model=OrgEmployeeOut,
+)
+async def set_employee_password(
+    org_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    body: SetEmployeePasswordRequest,
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> OrgEmployeeOut:
+    """Set or reset an employee's login password (org admin only).
+
+    Enables login for the employee and invalidates any existing sessions.
+    """
+    await require_org_admin(str(org_id), current_user, db)
+
+    from app.auth.member_auth import hash_password
+
+    result = await db.execute(
+        select(OrgEmployee).where(OrgEmployee.id == employee_id, OrgEmployee.org_id == org_id)
+    )
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    employee.password_hash = hash_password(body.password)
+    employee.is_login_enabled = True
+    employee.sessions_invalidated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return OrgEmployeeOut.model_validate(employee)
 
 
 # ── Member Profile Sections ───────────────────────────────────────────────────

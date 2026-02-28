@@ -9,7 +9,7 @@ from app.config import settings
 from app.connectors import registry
 from app.database import AsyncSessionLocal, engine
 from app.models import *  # noqa: F401, F403  — ensures models are registered
-from app.routers import account_contacts, chat, integrations, organizations, users
+from app.routers import account_contacts, chat, integrations, member_auth, member_dashboard, organizations, users
 
 
 async def seed_connectors() -> None:
@@ -71,6 +71,8 @@ app.include_router(organizations.router, prefix="/api/v1")
 app.include_router(integrations.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(account_contacts.router, prefix="/api/v1")
+app.include_router(member_auth.router, prefix="/api/v1")
+app.include_router(member_dashboard.router, prefix="/api/v1")
 
 
 @app.exception_handler(Exception)

@@ -10,8 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.clerk import verify_clerk_token
+from app.auth.member_auth import verify_member_token
 from app.database import get_db
-from app.models.organization import Organization, OrganizationMember
+from app.models.organization import Organization, OrgEmployee, OrganizationMember
 from app.models.user import User
 
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -102,3 +103,53 @@ async def require_super_admin(current_user: CurrentUser) -> User:
 
 
 SuperAdmin = Annotated[User, Depends(require_super_admin)]
+
+
+# ── Member (OrgEmployee) auth ─────────────────────────────────────────────────
+
+async def get_current_member(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> OrgEmployee:
+    """Verify a member JWT and return the OrgEmployee record.
+
+    Checks:
+    - Token is valid and of type 'member'
+    - Employee exists and has login enabled
+    - Token was issued after the last session invalidation
+    """
+    token = credentials.credentials
+    try:
+        payload = verify_member_token(token)
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid or expired token: {exc}",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    employee_id = payload.get("sub")
+    if not employee_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing subject in token")
+
+    result = await db.execute(select(OrgEmployee).where(OrgEmployee.id == employee_id))
+    employee = result.scalar_one_or_none()
+
+    if employee is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Employee not found")
+    if not employee.is_login_enabled:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login disabled for this account")
+
+    # Check session invalidation — reject tokens issued before invalidation timestamp
+    if employee.sessions_invalidated_at:
+        token_iat = payload.get("iat")
+        if token_iat and datetime.fromtimestamp(token_iat, tz=timezone.utc) < employee.sessions_invalidated_at:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session has been invalidated. Please log in again.",
+            )
+
+    return employee
+
+
+CurrentMember = Annotated[OrgEmployee, Depends(get_current_member)]

@@ -18,9 +18,10 @@ interface ConversationListProps {
   conversations: Conversation[];
   orgId: string;
   onDelete: (id: string) => Promise<void>;
+  basePath?: string;
 }
 
-export function ConversationList({ conversations, orgId, onDelete }: ConversationListProps) {
+export function ConversationList({ conversations, orgId, onDelete, basePath = "/chat" }: ConversationListProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -31,8 +32,8 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
     setDeletingId(convId);
     try {
       await onDelete(convId);
-      if (pathname === `/chat/${convId}`) {
-        router.push("/chat");
+      if (pathname === `${basePath}/${convId}`) {
+        router.push(basePath);
       }
     } finally {
       setDeletingId(null);
@@ -43,7 +44,7 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
     <div className="flex flex-col h-full border-r w-64 shrink-0">
       <div className="p-3 border-b">
         <Button asChild className="w-full" size="sm">
-          <Link href="/chat">
+          <Link href={basePath}>
             <Plus className="size-4 mr-2" />
             New Chat
           </Link>
@@ -59,7 +60,7 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
         )}
         {conversations.map((conv) => {
           const isDeleting = deletingId === conv.id;
-          const isActive = pathname === `/chat/${conv.id}`;
+          const isActive = pathname === `${basePath}/${conv.id}`;
 
           return (
             <div
@@ -70,7 +71,7 @@ export function ConversationList({ conversations, orgId, onDelete }: Conversatio
               )}
             >
               <Link
-                href={`/chat/${conv.id}`}
+                href={`${basePath}/${conv.id}`}
                 className="flex items-center gap-2 min-w-0 flex-1 px-2 py-2"
               >
                 <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />

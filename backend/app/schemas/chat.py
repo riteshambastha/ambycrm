@@ -7,7 +7,7 @@ from pydantic import BaseModel
 class ConversationOut(BaseModel):
     id: uuid.UUID
     org_id: uuid.UUID
-    user_id: uuid.UUID
+    user_id: uuid.UUID | None = None
     title: str | None
     is_archived: bool
     created_at: datetime
@@ -30,4 +30,4 @@ class MessageOut(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str
-    org_id: uuid.UUID
+    org_id: uuid.UUID | None = None

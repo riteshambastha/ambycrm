@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Encryption key for OAuth tokens (Fernet 32-byte base64)
     ENCRYPTION_KEY: str = ""
 
+    # Member (OrgEmployee) JWT auth — separate from Clerk
+    MEMBER_JWT_SECRET: str = "change-me-member-jwt-secret"
+    MEMBER_JWT_EXPIRY_DAYS: int = 30
+
     # LLM
     OPENAI_API_KEY: str = ""
     ANTHROPIC_API_KEY: str = ""

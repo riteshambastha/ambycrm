@@ -70,6 +70,8 @@ class OrgEmployee(Base):
     Lightweight employee record for org-level Microsoft 365 email queries.
     These employees do NOT need an AmbyChat account — the admin adds them by
     name + work email so the AI can query their Microsoft 365 mailboxes.
+    Optionally, the admin can set a password to allow the employee to log in
+    and query their own data via the member dashboard.
     """
     __tablename__ = "org_employees"
 
@@ -79,6 +81,9 @@ class OrgEmployee(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     work_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_login_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sessions_invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationship
